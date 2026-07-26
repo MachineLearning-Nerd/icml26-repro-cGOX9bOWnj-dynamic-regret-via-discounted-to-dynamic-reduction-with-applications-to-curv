@@ -180,8 +180,44 @@ def check_claim2(lines: list[str]) -> bool:
     # 2. derivation link slacks must be nonnegative in the raw table
     link_cols = [c for c in rows[0] if c.startswith("L") and "slack" in c]
     link_bad = {c: sum(1 for r in rows if r[c] != "" and float(r[c]) < -1e-9) for c in link_cols}
-    lines.append(f"claim2 links   : {link_cols} negative-slack counts = {link_bad}")
-    ok &= all(v == 0 for v in link_bad.values())
+    # L3 is Lemma 25, which the campaign proved false by certified counterexample,
+    # so negative L3 slack is an expected documented finding. Every other link
+    # must hold on every configuration.
+    non_l3_bad = {k: v for k, v in link_bad.items() if not k.startswith("L3")}
+    lines.append(f"claim2 links   : negative-slack counts = {link_bad}; "
+                 f"non-L3 links all hold = {all(v == 0 for v in non_l3_bad.values())} "
+                 f"(L3 = Lemma 25, independently certified false)")
+    ok &= all(v == 0 for v in non_l3_bad.values())
+
+    # Independently re-certify the Lemma 25 counterexample from the stored raw
+    # instance, recomputing both sides here rather than trusting the verifier.
+    l25 = _read_json(claim, "lemma25_counterexample.json")
+    ce = l25["certified_counterexample"]
+    from mpmath import log as mlog
+    from mpmath import mp, mpf
+
+    mp.dps = 80
+    zz, cc, bb, ll = ce["z"], ce["c"], mpf(ce["beta"]), mpf(ce["lambda"])
+    A, lhs = ll, mpf(0)
+    for t in range(ce["T"]):
+        A = mpf(zz[t]) ** 2 + bb * A
+        lhs += mpf(cc[t]) ** 2 * mpf(zz[t]) ** 2 / A
+    S = sum(bb ** (ce["T"] - 1 - t) * mpf(zz[t]) ** 2 for t in range(ce["T"]))
+    rhs = mlog(1 / bb) * sum(mpf(x) ** 2 for x in cc) + max(mpf(x) ** 2 for x in cc) * mlog(1 + S / ll)
+    recert = bool(rhs - lhs < 0)
+    agrees = np.isclose(float(lhs), ce["lhs_float"], rtol=1e-9) and np.isclose(float(rhs), ce["rhs_float"], rtol=1e-9)
+    lines.append(
+        f"claim2 lemma25 : counterexample re-certified independently at 80 dps: violates={recert}, "
+        f"matches stored values={agrees} (LHS {float(lhs):.8f} > RHS {float(rhs):.8f})"
+    )
+    ok &= recert and agrees
+
+    route4 = _read_json(claim, "route4_focused_falsification.json")
+    lines.append(
+        f"claim2 route4  : {route4['n_restarts']} seeded restarts in the Lemma-25-failure region, "
+        f"best margin {route4['best_margin']:.4g}, counterexample to Theorem 2 found="
+        f"{route4['found_violation_of_E']}"
+    )
 
     # 3. the sweep must actually be calibrated: some configuration has to get
     #    close to the bound, or "no violation" carries no information

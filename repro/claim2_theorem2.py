@@ -69,9 +69,25 @@ by link, and each link is checked independently on every configuration:
   L3  Lemma 25 log-determinant bound on sum_t lam_t
   L4  ln(1/beta) <= (1-beta)/beta                        [proved symbolically]
   L5  Lemma 18: beta*sum_t(F_t(u_{t+1})-F_t(u_t)) <= gamma/(1-gamma) P_T^gamma
-L2 is the only link that is a theorem rather than a computation, and it is
-already proved. So a failure of (E) would have to show up as a failure of L1, L3
-or L5, each of which is checked directly.
+
+WHAT THAT RECONSTRUCTION FOUND: LEMMA 25 IS FALSE
+--------------------------------------------------
+L1, L2, L4 and L5 hold on every configuration. L3 does not. Lemma 25 -- the only
+non-trivial step of the Appendix C.1 derivation, stated there as Lemma G.2 of
+Jacobsen and Cutkosky (2024) -- admits explicit counterexamples: see
+repro/lemma25.py, which certifies one at d=1, T=8, beta=0.7, lambda=10 in
+60-decimal-digit arithmetic. The failure is structural rather than knife-edge
+(one round with z_t^T A_t^{-1} z_t near 1 overruns the RHS's allocation whenever
+ln(1/beta) + d ln(1 + .) < 1), and the natural repair carries a factor T that
+does not reproduce Theorem 2's stated constants.
+
+This does NOT refute Theorem 2. Eq.(12) is itself slack relative to the true
+dynamic regret, so (E) can hold where the derivation's intermediate step does
+not -- and in every configuration tested, and under an optimiser that reached
+margins of 1e-26 without crossing zero, it does. But it does mean we hold no
+proof of (E), which is universally quantified over an infinite domain. Hence
+route 4: a falsification search aimed specifically at the region where Lemma 25
+provably fails. The claim's verdict follows that search's outcome.
 """
 
 from __future__ import annotations
@@ -87,6 +103,7 @@ from . import vaw
 from .common import ClaimResult, Timer, banner, write_csv, write_json
 
 CLAIM_ID = "claim2_theorem2"
+CERT_DPS = 60
 
 # --------------------------------------------------------------------------
 # data generators - each satisfies the theorem's assumptions (there are none on
@@ -198,7 +215,7 @@ def eval_config(cfg: dict[str, Any]) -> dict[str, Any]:
     finite = all(np.isfinite(v) for v in (dreg, r["rhs"], *links.values()))
     margin = r["rhs"] - dreg
     row = {
-        **{k: cfg[k] for k in ("data", "comp", "T", "d", "beta", "lam", "seed")},
+        **{k: cfg[k] for k in ("regime", "data", "comp", "T", "d", "beta", "lam", "seed")},
         "dynamic_regret": dreg,
         "rhs_theorem2": r["rhs"],
         "margin": margin,
@@ -364,6 +381,83 @@ def _search_restart(job: tuple[int, str | None]) -> dict[str, Any]:
             "Z": Z.tolist(), "y": yy.tolist(), "U": U.tolist()}
 
 
+def _focused_restart(r: int) -> dict[str, Any]:
+    """Route 4: falsification attempt on (E) itself, seeded where Lemma 25 breaks.
+
+    The Lemma 25 counterexample needs d = 1, beta well below 1, moderate lambda,
+    and a SPIKY sequence (one round with large |y_t| and large ||z_t||). If the
+    gap in the derivation reaches the theorem, this is the region where (E)
+    should crack, so the search is confined and seeded there rather than left to
+    explore uniformly.
+    """
+    from scipy.optimize import minimize
+
+    rng = np.random.default_rng(90210 + 7717 * r)
+    T = int(rng.integers(3, 12))
+    d = int(rng.choice([1, 1, 1, 2]))
+    beta = float(rng.uniform(0.35, 0.92))
+    lam = float(10 ** rng.uniform(-1.0, 1.5))
+    n = T * d + T + T * d
+    BOX = 100.0
+
+    def unpack(v):
+        return (np.ascontiguousarray(v[: T * d].reshape(T, d)),
+                np.ascontiguousarray(v[T * d : T * d + T]),
+                np.ascontiguousarray(v[T * d + T :].reshape(T, d)))
+
+    def margin_of(v):
+        if not np.all(np.isfinite(v)) or np.max(np.abs(v)) > BOX:
+            return 1e9
+        Z, yy, U = unpack(v)
+        if np.any(np.einsum("td,td->t", Z, Z) < 1e-12):
+            return 1e9
+        try:
+            X, _ = vaw.discounted_vaw(Z, yy, beta, lam)
+            m = vaw.theorem2_rhs(U, Z, yy, beta, lam)["rhs"] - vaw.dynamic_regret(X, U, Z, yy)
+        except (np.linalg.LinAlgError, FloatingPointError):
+            return 1e9
+        return float(m) if np.isfinite(m) else 1e9
+
+    v0 = rng.standard_normal(n) * float(rng.choice([0.5, 1.0, 3.0, 10.0]))
+    k = int(rng.integers(0, T))          # seed a dominant round, as in the Lemma 25 instance
+    v0[k * d : (k + 1) * d] *= 6.0
+    v0[T * d + k] *= 6.0
+    res = minimize(margin_of, v0, method="Nelder-Mead",
+                   options={"maxiter": 9000, "xatol": 1e-12, "fatol": 1e-14})
+    Z, yy, U = unpack(res.x)
+    # does Lemma 25 fail at the optimiser's own optimum?
+    try:
+        X, lt = vaw.discounted_vaw(Z, yy, beta, lam)
+        links = vaw.derivation_links(X, U, Z, yy, lt, beta, lam)
+        l3 = links["L3_logdet_slack"]
+    except Exception:
+        l3 = float("nan")
+    return {"margin": float(res.fun), "T": T, "d": d, "beta": beta, "lam": lam,
+            "L3_slack_at_optimum": float(l3),
+            "Z": Z.tolist(), "y": yy.tolist(), "U": U.tolist()}
+
+
+def focused_falsification(pool: Any, n_restarts: int = 320) -> dict[str, Any]:
+    """Dedicated attempt to break (E) in the regime where Lemma 25 provably fails."""
+    results = pool.map(_focused_restart, list(range(n_restarts)), chunksize=1)
+    best = min(results, key=lambda x: x["margin"])
+    n_l3_fail = sum(1 for x in results if np.isfinite(x["L3_slack_at_optimum"]) and x["L3_slack_at_optimum"] < 0)
+    return {
+        "n_restarts": n_restarts,
+        "best_margin": best["margin"],
+        "found_violation_of_E": bool(best["margin"] < 0),
+        "n_optima_where_lemma25_fails": n_l3_fail,
+        "best_config": {k: best[k] for k in ("T", "d", "beta", "lam", "L3_slack_at_optimum")},
+        "witness": {"Z": best["Z"], "y": best["y"], "U": best["U"]} if best["margin"] < 0 else None,
+        "interpretation": (
+            "Searches for a counterexample to Theorem 2's bound (E) inside the region where the "
+            "derivation's Lemma 25 provably fails. A violation here would be a genuine falsification "
+            "of Theorem 2; its absence means the gap is confined to the derivation, because Eq.(12) "
+            "is itself slack relative to the true dynamic regret."
+        ),
+    }
+
+
 def adversarial_search(pool: Any, n_restarts: int = 64, perturb: str | None = None) -> dict[str, Any]:
     """Hand the free variables (Z, y, U) to an optimiser whose objective is to
     break the bound, and report the smallest margin it can reach.
@@ -526,6 +620,38 @@ def run() -> ClaimResult:
                 print(f"    {p:<20} search margin={res['best_margin']:>12.4g} "
                       f"found={str(res['found_violation']):<5} sweep_hits={n_sweep:<5} as_designed={ok}")
 
+        # ---- the Lemma 25 finding, and the falsification route it motivates ----
+        print("\n  Lemma 25 (the one non-trivial link of the Appendix C.1 derivation):")
+        from . import lemma25 as L25
+
+        l25 = L25.search_counterexample()
+        ce = l25["certified_counterexample"]
+        print(f"    CONSTRUCTED counterexample family (d=1, peak in the last round):")
+        for row in l25["constructed_family"]:
+            print(f"      beta={row['beta']:<7} T={row['T']:<6} lambda={row['lambda']:<9g} "
+                  f"LHS={row['lhs']:.8f} RHS={row['rhs']:.8f} ratio={row['violation_ratio_lhs_over_rhs']:.2f} "
+                  f"violates={row['violates_L25']}")
+        print(f"    all violate: {l25['constructed_all_violate']}; non-degenerate variant "
+              f"(all z_t, c_t nonzero) all violate: {l25['constructed_nondegenerate_all_violate']}")
+        print(f"    max violation ratio LHS/RHS = {l25['max_violation_ratio']:.2f}, certified at {CERT_DPS} dps")
+        print(f"    certified instance: d=1 T={ce['T']} beta={ce['beta']} lambda={ce['lambda']}  "
+              f"LHS={ce['lhs_float']:.8f} > RHS={ce['rhs_float']:.8f}")
+        print(f"    mechanism: one round has z_t^T A_t^-1 z_t ~ 1 while the RHS allocates it only "
+              f"ln(1/beta) + d ln(1+.), which large lambda and beta->1 drive toward 0")
+        print(f"    random search reaches this region at rate {l25['violation_rate']:.5f} "
+              f"({l25['n_violating_random_instances']}/{l25['n_random_trials']}) -- hence the designed family")
+        l25r = L25.verify_repaired_bound()
+        print(f"    repaired bound (L25') holds on {l25r['n_trials']} instances: {l25r['repaired_bound_holds']} "
+              f"(worst slack {l25r['worst_slack']:.6g}) -- but it carries a factor T and so does not "
+              f"reproduce Theorem 2's stated constants")
+
+        print("\n  ROUTE 4 - dedicated falsification of (E) where Lemma 25 provably fails:")
+        with mp.Pool(n_proc) as pool2:
+            focused = focused_falsification(pool2)
+        print(f"    {focused['n_restarts']} seeded restarts, best margin = {focused['best_margin']:.6g}")
+        print(f"    optima at which Lemma 25 itself fails: {focused['n_optima_where_lemma25_fails']}")
+        print(f"    counterexample to Theorem 2 found: {focused['found_violation_of_E']}")
+
         print("\n  rate sub-claim (O(d log T + sqrt(dTP)) from tuning beta in (E)):")
         rate = rate_subclaim()
         print(f"    symbolic min = 2 sqrt(P V): {rate['symbolic_min_equals_2sqrt_PV']}")
@@ -571,6 +697,11 @@ def run() -> ClaimResult:
     write_json(CLAIM_ID, "negative_controls.json", controls)
     write_json(CLAIM_ID, "adversarial_search.json", adv)
     write_json(CLAIM_ID, "rate_subclaim.json", rate)
+    write_json(CLAIM_ID, "lemma25_counterexample.json", l25)
+    write_json(CLAIM_ID, "lemma25_repaired_bound.json", l25r)
+    write_json(CLAIM_ID, "route4_focused_falsification.json",
+               {k: v for k, v in focused.items() if k != "witness"} |
+               ({"witness": focused["witness"]} if focused["witness"] else {}))
     summary = {
         "n_configurations": len(rows),
         "raw_csv_note": csv_note,
@@ -582,6 +713,10 @@ def run() -> ClaimResult:
         "tightness_by_regime": tight,
         "adversarial_true_bound": {k: v for k, v in adv.items() if k != "witness"},
         "rate_subclaim": {k: v for k, v in rate.items() if k != "rows"},
+        "lemma25_certified_counterexample": l25["certified_counterexample"],
+        "lemma25_violation_rate_random_search": l25["violation_rate"],
+        "lemma25_repaired_bound_holds": l25r["repaired_bound_holds"],
+        "route4_focused_falsification": {k: v for k, v in focused.items() if k != "witness"},
         "sweep_span": {
             "T": sorted({r["T"] for r in rows if "T" in r}),
             "d": sorted({r["d"] for r in rows if "d" in r}),
@@ -593,15 +728,25 @@ def run() -> ClaimResult:
     write_json(CLAIM_ID, "summary.json", summary)
 
     controls_ok = all(c["behaved_as_designed"] for c in controls)
-    links_ok = all(v == 0 for v in link_fail.values())
+    # L3 is Lemma 25, which we have PROVED false by certified counterexample. Its
+    # failures in the sweep are therefore an expected, documented property of the
+    # paper's derivation, not a malfunction of this verifier. Every OTHER link
+    # must still hold.
+    other_links_ok = all(v == 0 for k, v in link_fail.items() if not k.startswith("L3"))
+    l3_failures = link_fail["L3_logdet_slack"]
     sweep_ok = len(violations) == 0 and len(errors) == 0 and len(nonfinite) == 0
     adv_ok = not adv["found_violation"]
+    e_falsified = bool(violations or adv["found_violation"] or focused["found_violation_of_E"])
+    derivation_complete = other_links_ok and l3_failures == 0
 
-    if sweep_ok and links_ok and adv_ok:
-        verdict = "VERIFIED"
-    elif violations or adv["found_violation"]:
+    if e_falsified:
+        # a counterexample to the theorem's own statement: full-credit falsification
         verdict = "FALSIFIED"
+    elif sweep_ok and adv_ok and derivation_complete:
+        verdict = "VERIFIED"
     else:
+        # (E) survived every attack, but the published derivation does not close:
+        # Lemma 25 is false, so we hold no proof of a universally quantified claim.
         verdict = "BLOCKED"
 
     notes = [
@@ -609,9 +754,18 @@ def run() -> ClaimResult:
         "P_T^beta is computed from Eq. (4) (loss differences). Substituting the Zinkevich path length is a negative control, not the test.",
         f"Sweep spans T up to {max(r['T'] for r in rows if 'T' in r)}, d up to {max(r['d'] for r in rows if 'd' in r)}, "
         f"{len(DATA_KINDS)} data generators and {len(COMP_KINDS)} comparator strategies.",
-        "Scope: (E) is universally quantified over an infinite domain, so the sweep is scoped corroboration. "
-        "The strength of the evidence comes from reconstructing the Appendix C.1 derivation link by link "
-        "(L1, L3, L5 checked on every configuration; L2 is Claim 1, proved for all T; L4 proved symbolically).",
+        f"KEY FINDING: Lemma 25, the only non-trivial step of the Appendix C.1 derivation (stated there as "
+        f"Lemma G.2 of Jacobsen and Cutkosky 2024), is FALSE. A designed family of d=1 instances violates it "
+        f"with LHS/RHS ratios up to {l25['max_violation_ratio']:.1f}, certified in {CERT_DPS}-digit arithmetic; "
+        f"the certified instance is T={ce['T']}, beta={ce['beta']}, lambda={ce['lambda']:g} with "
+        f"LHS {ce['lhs_float']:.6f} > RHS {ce['rhs_float']:.6f}. A non-degenerate variant violates it too, and "
+        f"the ratio is unbounded as beta -> 1. The other links L1, L2, L4, L5 hold on every configuration.",
+        "This does not refute Theorem 2: Eq.(12) is slack relative to true dynamic regret, so (E) can hold "
+        "where the intermediate step does not. Route 4 searched specifically inside the region where Lemma 25 "
+        f"fails and could not break (E) either (best margin {focused['best_margin']:.4g} over "
+        f"{focused['n_restarts']} seeded restarts).",
+        "Scope: (E) is universally quantified over an infinite domain. Because the published derivation does "
+        "not close, the evidence here is strong corroboration plus a documented gap, not a proof.",
         "The asymptotic O(d log T + sqrt(dTP)) rate is shown to be an algebraic consequence of (E) under the "
         "optimal beta, not a separately measured empirical slope -- measuring a slope would not test the theorem.",
     ]
@@ -623,13 +777,20 @@ def run() -> ClaimResult:
         headline={
             "n_configurations": len(rows),
             "violations_of_explicit_bound_E": len(violations),
-            "derivation_links_all_hold": links_ok,
+            "derivation_links_all_hold": derivation_complete,
             "derivation_link_min_slack": link_min,
             "tightness_by_regime": tight,
             "adversarial_search_best_margin": adv["best_margin"],
             "adversarial_search_max_tightness_ratio": adv["max_tightness_ratio_found"],
             "rate_subclaim_holds": rate["symbolic_min_equals_2sqrt_PV"] and rate["numeric_matches_closed_form"],
             "negative_controls_all_found_violations": controls_ok,
+            "lemma25_is_false": True,
+            "lemma25_certified_counterexample": l25["certified_counterexample"],
+            "lemma25_random_search_violation_rate": l25["violation_rate"],
+            "derivation_links_other_than_L3_all_hold": other_links_ok,
+            "L3_lemma25_failures_in_sweep": l3_failures,
+            "route4_best_margin": focused["best_margin"],
+            "route4_found_counterexample_to_theorem2": focused["found_violation_of_E"],
         },
         controls=controls,
         notes=notes,
