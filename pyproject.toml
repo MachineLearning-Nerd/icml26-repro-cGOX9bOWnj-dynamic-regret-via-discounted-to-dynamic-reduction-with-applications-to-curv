@@ -1,0 +1,19 @@
+[project]
+name = "repro-cgox9bownj"
+version = "0.1.0"
+description = "Claim-by-claim reproduction of 'Dynamic Regret via Discounted-to-Dynamic Reduction with Applications to Curved Losses and Adam Optimizer' (arXiv 2602.08372)"
+requires-python = "==3.12.*"
+dependencies = [
+    "numpy==2.1.3",
+    "scipy==1.14.1",
+    "sympy==1.13.3",
+    "pandas==2.2.3",
+    "matplotlib==3.9.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["repro"]
