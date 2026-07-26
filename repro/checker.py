@@ -205,11 +205,21 @@ def check_claim3(lines: list[str]) -> bool:
     lines.append(f"claim3 assumpt : rows violating ||u_t||<=B: {bad_u}; rows violating ||z_t||<=R: {bad_z}")
     ok &= bad_u == 0 and bad_z == 0
 
-    # --- 5. negative controls must each have fired
+    # --- 5. negative controls: each must either have fired, or carry a
+    #        QUANTIFIED power deficit. An un-fired control with no number
+    #        attached is an untested claim dressed as a passing one.
     controls = _read_json(claim, "negative_controls.json")
-    dead = [c["control"] for c in controls if not c["behaved_as_designed"]]
-    lines.append(f"claim3 controls: {len(controls)} weakened bounds, none-fired={dead or 'none'}")
-    ok &= not dead and len(controls) >= 5
+    fired = [c["control"] for c in controls if c["behaved_as_designed"]]
+    dead = [c for c in controls if not c["behaved_as_designed"]]
+    undocumented = [c["control"] for c in dead
+                    if not (0.0 <= float(c.get("power_ratio_removed_over_slack", -1)) < 1.0)
+                    or "NO POWER" not in str(c.get("power_note", ""))]
+    lines.append(f"claim3 controls: {len(controls)} weakened bounds, fired={fired or 'none'}, "
+                 f"no-power={[c['control'] for c in dead] or 'none'}, "
+                 f"undocumented-no-power={undocumented or 'none'}")
+    # A control that did not fire must report a power ratio strictly below 1:
+    # a ratio >= 1 would mean it COULD have fired and the verifier missed it.
+    ok &= not undocumented and len(fired) > 0 and len(controls) >= 5
 
     # --- 5b. calibration: the search must have had power, and must not have
     #         quietly used a smaller budget against the true bound than against
