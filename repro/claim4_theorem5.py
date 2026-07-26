@@ -97,10 +97,8 @@ def run() -> ClaimResult:
         with mp.Pool(nw) as pool:
             # ---- main verification -------------------------------------------
             print("\n  Running Algorithm 2 at the theorem's own T and parameters:")
-            rows = []
-            for i, s in enumerate(settings):
-                r = AC.evaluate_setting(s, pool)
-                rows.append(r)
+            rows = AC.evaluate_settings(settings, pool)
+            for i, r in enumerate(rows):
                 print(f"    [{i+1:>3}/{len(settings)}] {r['objective']:<22} d={r['d']} eps={r['eps']} "
                       f"c={r['c']} b2={r['beta2']:.6f} ({r['beta2_band']:<14}) T={r['T']:<8} "
                       f"E<={r['E_grad_c_upper_2se']:.4f}  holds={r['conclusion_holds']}")

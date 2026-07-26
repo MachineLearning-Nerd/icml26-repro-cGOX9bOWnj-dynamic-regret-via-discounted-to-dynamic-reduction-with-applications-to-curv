@@ -120,7 +120,33 @@ def initial_grad_c(setting: dict[str, Any]) -> float:
 def evaluate_setting(setting: dict[str, Any], pool: Any, n_runs: int = N_RUNS) -> dict[str, Any]:
     """Run n_runs independent seeds of one parameter setting and test the conclusion."""
     jobs = [{**setting, "seed": 1000 + 97 * i, "obj_seed": 17 + i} for i in range(n_runs)]
-    outs = pool.map(_one_run, jobs, chunksize=1)
+    outs = list(pool.map(_one_run, jobs, chunksize=1))
+    return _aggregate(setting, outs)
+
+
+def evaluate_settings(settings: list[dict[str, Any]], pool: Any,
+                      n_runs: int = N_RUNS) -> list[dict[str, Any]]:
+    """Evaluate MANY settings with one flat job list.
+
+    evaluate_setting submits only n_runs jobs at a time, so on a 32-core box 8
+    seeds occupy 8 workers and the other 24 idle while the settings are walked
+    one by one -- a 4x waste that turned this claim into a 14-hour job. Flatten
+    (setting x seed) into a single map so every worker stays busy. The runs are
+    independent, so this changes nothing about the numbers, only the wall clock.
+    """
+    jobs, owner = [], []
+    for si, st in enumerate(settings):
+        for i in range(n_runs):
+            jobs.append({**st, "seed": 1000 + 97 * i, "obj_seed": 17 + i})
+            owner.append(si)
+    outs = list(pool.map(_one_run, jobs, chunksize=1))
+    grouped: list[list[dict[str, Any]]] = [[] for _ in settings]
+    for si, o in zip(owner, outs):
+        grouped[si].append(o)
+    return [_aggregate(st, grouped[si]) for si, st in enumerate(settings)]
+
+
+def _aggregate(setting: dict[str, Any], outs: list[dict[str, Any]]) -> dict[str, Any]:
     means = np.array([o["mean_grad_c_upper"] for o in outs])
     est = float(means.mean())
     se = float(means.std(ddof=1) / np.sqrt(len(means))) if len(means) > 1 else 0.0
