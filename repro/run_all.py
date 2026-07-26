@@ -105,14 +105,24 @@ def main() -> int:
     _write_eval_md(summary)
 
     banner("SUMMARY")
+    print("  verdict = the scientific outcome for the claim (VERIFIED / FALSIFIED / BLOCKED).")
+    print("  instrument = whether the evidence pipeline itself was sound for that claim:")
+    print("      no crashed configurations, and every negative control fired as designed.")
+    print("  A BLOCKED verdict with a sound instrument is an honest result, NOT a run failure.\n")
     for r in results:
-        flag = "ok" if r["ok"] else "FAIL"
-        print(f"  {r['claim_id']:<24} {r['verdict']:<10} [{flag}]  {r['title']}")
+        flag = "sound" if r["ok"] else "UNSOUND"
+        print(f"  {r['claim_id']:<24} {r['verdict']:<10} [instrument: {flag}]  {r['title']}")
     print(f"\n  independent checker : {'ok' if check_ok else 'FAIL'}")
     print(f"  total runtime       : {total_s:.1f}s")
 
+    verdicts = {v: sum(1 for r in results if r["verdict"] == v)
+                for v in ("VERIFIED", "FALSIFIED", "BLOCKED")}
+    print(f"  verdict tally       : {verdicts['VERIFIED']} VERIFIED, "
+          f"{verdicts['FALSIFIED']} FALSIFIED, {verdicts['BLOCKED']} BLOCKED")
+
     all_ok = all(r["ok"] for r in results) and check_ok
-    print(f"\n  SUITE RESULT        : {'PASS' if all_ok else 'FAIL'}")
+    print(f"\n  INSTRUMENT RESULT   : {'SOUND' if all_ok else 'UNSOUND'}"
+          "   (this is the run's exit gate; verdicts are reported above)")
 
     # Local-mode projects have no artifact upload channel: the run log is the
     # only way evidence leaves the job. So dump every raw artifact inline, in a

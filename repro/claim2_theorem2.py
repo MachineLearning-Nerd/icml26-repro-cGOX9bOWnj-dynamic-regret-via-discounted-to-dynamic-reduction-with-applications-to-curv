@@ -773,7 +773,15 @@ def run() -> ClaimResult:
         claim_id=CLAIM_ID,
         title="Theorem 2 - discounted VAW dynamic regret (Section 3.1)",
         verdict=verdict,
-        ok=(verdict in ("VERIFIED", "FALSIFIED")) and controls_ok,
+        # ok gates the RUN, not the science. Theorem 2's verdict is BLOCKED --
+        # by design, because the published derivation goes through Lemma 25 and
+        # Lemma 25 is false as stated. That is the finding, not a job failure,
+        # and exiting non-zero on it would misreport a successful investigation
+        # as broken infrastructure. What does fail the run is an unsound
+        # instrument: a crashed configuration, or a negative control that never
+        # fired (a test with no power cannot support any verdict, BLOCKED
+        # included).
+        ok=controls_ok and len(errors) == 0,
         headline={
             "n_configurations": len(rows),
             "violations_of_explicit_bound_E": len(violations),
