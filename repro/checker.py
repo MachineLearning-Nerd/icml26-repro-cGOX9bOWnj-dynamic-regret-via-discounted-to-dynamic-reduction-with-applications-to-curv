@@ -126,8 +126,134 @@ def check_claim1(lines: list[str]) -> bool:
     return ok
 
 
+# --------------------------------------------------------------------------
+# claim 3
+# --------------------------------------------------------------------------
+def check_claim3(lines: list[str]) -> bool:
+    """Re-derive Theorem 3's bound from the paper formula, not from repro.aioli.
+
+    Terms 2, 3 and 4 of (E3) are functions of quantities the sweep already
+    stored per row (T, d, beta, B, R, lambda, P_T^beta), so they can be
+    recomputed here from the printed statement of the theorem without touching
+    the verifier's code. Term 1 needs ||u_1||, which is not a stored column, so
+    it is recovered as the residual and only sanity-checked for sign and scale.
+    """
+    import math
+
+    ok = True
+    claim = "claim3_theorem34"
+    rows = _read_csv(claim, "sweep_results.csv")
+    summary = _read_json(claim, "summary.json")
+
+    if not rows:
+        lines.append("claim3 sweep   : EMPTY sweep_results.csv")
+        return False
+
+    # --- 1. margin, holds and the violation count, recomputed from raw columns
+    n_viol = 0
+    n_margin_mismatch = 0
+    for r in rows:
+        dreg, rhs = float(r["dynamic_regret"]), float(r["rhs_theorem3"])
+        margin = rhs - dreg
+        if abs(margin - float(r["margin"])) > 1e-6 * max(1.0, abs(margin)):
+            n_margin_mismatch += 1
+        if (margin >= 0) != (r["holds"] == "True"):
+            n_margin_mismatch += 1
+        if margin < 0:
+            n_viol += 1
+    lines.append(f"claim3 margins : {len(rows)} rows recomputed from raw columns, "
+                 f"mismatches={n_margin_mismatch}, violations={n_viol} "
+                 f"(summary says {summary['n_violations_of_E3']})")
+    ok &= n_margin_mismatch == 0 and n_viol == int(summary["n_violations_of_E3"])
+
+    # --- 2. terms 2-4 of (E3) re-derived from the theorem statement itself
+    worst_rel = 0.0
+    checked = 0
+    for r in rows:
+        T, d = int(r["T"]), int(r["d"])
+        beta, B, R, lam = float(r["beta"]), float(r["B"]), float(r["R"]), float(r["lam"])
+        P = float(r["P_T_beta"])
+        # sum_{t=1..T} beta^{T-t} = (1 - beta^T) / (1 - beta)
+        geo = (1.0 - beta**T) / (1.0 - beta)
+        t2 = d * (1 + B * R) * math.log(1 + R * R * geo / (d * lam * (1 + B * R)))
+        t3 = (beta / (1 - beta)) * P
+        t4 = ((1 - beta) / beta) * d * (1 + B * R) * T
+        for name, mine, theirs in (("term2", t2, float(r["term2"])),
+                                   ("term3", t3, float(r["term3"])),
+                                   ("term4", t4, float(r["term4"]))):
+            rel = abs(mine - theirs) / max(1.0, abs(theirs))
+            worst_rel = max(worst_rel, rel)
+        checked += 1
+    lines.append(f"claim3 formula : terms 2-4 of (E3) re-derived from the paper statement on "
+                 f"{checked} rows, worst relative deviation {worst_rel:.3e}")
+    ok &= worst_rel < 1e-9
+
+    # --- 3. term1 must be beta*lambda*||u_1||^2 >= 0 and the four terms must sum to the RHS
+    n_sum_bad = sum(
+        1 for r in rows
+        if abs(sum(float(r[k]) for k in ("term1", "term2", "term3", "term4")) - float(r["rhs_theorem3"]))
+        > 1e-6 * max(1.0, abs(float(r["rhs_theorem3"])))
+    )
+    n_t1_bad = sum(1 for r in rows if float(r["term1"]) < -1e-12)
+    lines.append(f"claim3 terms   : rows where term1+..+term4 != rhs: {n_sum_bad}; "
+                 f"rows with negative term1: {n_t1_bad}")
+    ok &= n_sum_bad == 0 and n_t1_bad == 0
+
+    # --- 4. assumptions of Theorems 3/4 actually enforced in the data
+    bad_u = sum(1 for r in rows if float(r["max_comparator_norm"]) > float(r["B"]) * (1 + 1e-9))
+    bad_z = sum(1 for r in rows if float(r["max_feature_norm"]) > float(r["R"]) * (1 + 1e-9))
+    lines.append(f"claim3 assumpt : rows violating ||u_t||<=B: {bad_u}; rows violating ||z_t||<=R: {bad_z}")
+    ok &= bad_u == 0 and bad_z == 0
+
+    # --- 5. negative controls must each have fired
+    controls = _read_json(claim, "negative_controls.json")
+    dead = [c["control"] for c in controls if not c["behaved_as_designed"]]
+    lines.append(f"claim3 controls: {len(controls)} weakened bounds, none-fired={dead or 'none'}")
+    ok &= not dead and len(controls) >= 5
+
+    # --- 6. B-dependence gates recomputed from the raw per-B table
+    bd = _read_csv(claim, "b_dependence.csv")
+    bsum = _read_json(claim, "b_dependence_summary.json")
+    a_max = max(float(r["regret_aioli_mean"]) for r in bd)
+    o_max = max(float(r["regret_ons_mean"]) for r in bd)
+    within = all(float(r["regret_aioli_mean"]) <= float(r["bound_theorem3_mean"]) for r in bd)
+    n_seeds_bad = sum(1 for r in bd if int(r["n_seeds"]) == 0)
+    lines.append(f"claim3 B-dep   : {len(bd)} B values, no empty strata={n_seeds_bad == 0}, "
+                 f"AIOLI max {a_max:.3f} vs ONS max {o_max:.3f}, inside (E3) at every B={within}")
+    ok &= (n_seeds_bad == 0
+           and within == bool(bsum["aioli_regret_within_theorem3_bound_at_every_B"])
+           and abs(a_max - float(bsum["levels"]["aioli_max_regret_over_B_range"])) < 1e-6
+           and abs(o_max - float(bsum["levels"]["ons_max_regret_over_B_range"])) < 1e-6)
+
+    # A probe whose positive control does not move cannot detect B-dependence
+    # at all, so the separation is only meaningful if ONS actually grew.
+    ons_grew = o_max > 10.0 * max(a_max, 1.0)
+    lines.append(f"claim3 B-ctrl  : ONS positive control grew to >10x AIOLI={ons_grew} "
+                 f"(if False the probe has no power and no B conclusion is supportable)")
+    ok &= ons_grew == bool(bsum["ons_regret_far_exceeds_aioli"])
+
+    # --- 7. Theorem 4 ensemble ratios recomputed from the raw table
+    ens = _read_csv(claim, "ensemble_theorem4.csv")
+    esum = _read_json(claim, "ensemble_summary.json")
+    ratios = [float(r["regret_ensemble"]) / float(r["theorem4_scale_dBlogBT_plus_sqrt_dBTP"])
+              for r in ens if float(r["theorem4_scale_dBlogBT_plus_sqrt_dBTP"]) > 0]
+    max_ratio = max(ratios) if ratios else float("nan")
+    lines.append(f"claim3 thm4    : {len(ens)} ensemble configs, max regret/scale recomputed "
+                 f"{max_ratio:.4f} (summary says {float(esum['max_ratio_regret_over_theorem4_scale']):.4f})")
+    ok &= len(ens) > 0 and abs(max_ratio - float(esum["max_ratio_regret_over_theorem4_scale"])) < 1e-6
+
+    # --- 8. the implicit update must have been solved, not approximated
+    unconv = sum(1 for r in rows if r.get("solver_converged") != "True")
+    lines.append(f"claim3 solver  : rows with an uncertified implicit solve: {unconv}; "
+                 f"worst relative Newton gradient norm {float(summary['worst_relative_newton_gradnorm']):.3e}")
+    ok &= unconv == 0 and float(summary["worst_relative_newton_gradnorm"]) < 1e-6
+
+    return ok
+
+
 CHECKS: dict[str, Callable[[list[str]], bool]] = {
     "claim1_theorem1": check_claim1,
+    "claim3_theorem34": check_claim3,
 }
 
 
