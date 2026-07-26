@@ -507,8 +507,13 @@ def _margin_job(pt: dict[str, Any]) -> dict[str, Any]:
 
 
 N_SEARCH_RANDOM = 320
-N_SEARCH_LOCAL = 24          # local moves per control, from each of the top seeds
+N_SEARCH_LOCAL = 24          # local moves per target, from each of the top seeds
 N_SEARCH_TOP = 4
+# Hill-climbing rounds. One mutation step left zinkevich_path at 90.3% and
+# drop_B_dependence at 96.7% of the slack they needed -- marginal, not
+# structurally out of reach -- so the refinement is iterated rather than
+# single-shot. halve_log_term sat at 45.2% and is not expected to move.
+N_SEARCH_ROUNDS = 3
 
 
 def adversarial_search(pool: Any) -> dict[str, Any]:
@@ -525,14 +530,16 @@ def adversarial_search(pool: Any) -> dict[str, Any]:
     n_evals = len(evals)
     for tgt in targets:
         key = f"margin_{tgt}" if tgt != "true" else "margin_true"
-        pool_sorted = sorted(evals, key=lambda e: e[key])
-        seeds_pts = [e["point"] for e in pool_sorted[:N_SEARCH_TOP]]
-        local = [_mutate(sp, rng, 9000 + 97 * i + j)
-                 for i, sp in enumerate(seeds_pts) for j in range(N_SEARCH_LOCAL)]
-        loc_evals = [e for e in pool.map(_margin_job, local, chunksize=2)
-                     if "error" not in e and e["finite"]]
-        n_evals += len(loc_evals)
-        allev = pool_sorted + loc_evals
+        allev = sorted(evals, key=lambda e: e[key])
+        for rnd in range(N_SEARCH_ROUNDS):
+            seeds_pts = [e["point"] for e in allev[:N_SEARCH_TOP]]
+            local = [_mutate(sp, rng, 9000 + 9973 * rnd + 97 * i + j)
+                     for i, sp in enumerate(seeds_pts) for j in range(N_SEARCH_LOCAL)]
+            loc_evals = [e for e in pool.map(_margin_job, local, chunksize=2)
+                         if "error" not in e and e["finite"]]
+            n_evals += len(loc_evals)
+            allev = sorted(allev + loc_evals, key=lambda e: e[key])
+        loc_evals = allev
         b = min(allev, key=lambda e: e[key])
         # Power accounting. A weakening removes (margin_true - margin_weakened)
         # from the bound; it can only produce a violation where that exceeds the
@@ -553,7 +560,8 @@ def adversarial_search(pool: Any) -> dict[str, Any]:
                    for k, v in b["point"].items()},
             "dynamic_regret_there": float(b["dynamic_regret"]),
             "tightness_ratio_there": float(b["tightness_ratio"]),
-            "n_local_moves": len(loc_evals),
+            "n_search_rounds": N_SEARCH_ROUNDS,
+            "n_local_moves": N_SEARCH_ROUNDS * N_SEARCH_TOP * N_SEARCH_LOCAL,
         }
 
     max_tight = max((e["tightness_ratio"] for e in evals if np.isfinite(e["tightness_ratio"])),
