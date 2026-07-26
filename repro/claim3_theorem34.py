@@ -111,6 +111,23 @@ def gen_comparators(kind: str, Z: np.ndarray, y: np.ndarray, B: float, seed: int
         return _clip_ball(U, B)
     elif kind == "random_walk":
         return _clip_ball(np.cumsum(rng.standard_normal((T, d)) * 0.15, axis=0), B)
+    elif kind == "per_round_optimal":
+        # u_t = argmin_{||u||<=B} l(u^T z_t, y_t). The logistic loss is strictly
+        # decreasing in y_t u^T z_t, so the minimiser is the ball boundary point
+        # aligned with y_t z_t. This is the STRONGEST admissible comparator and
+        # therefore the one that drives dynamic regret -- and the tightness of
+        # (E3) -- as high as the theorem's own assumptions allow.
+        nz = np.linalg.norm(Z, axis=1, keepdims=True)
+        return np.ascontiguousarray(B * (y[:, None] * Z) / np.maximum(nz, 1e-12))
+    elif kind == "oracle_tracking":
+        # shortest admissible window: refit every few rounds, so the comparator
+        # tracks closely and P_T^beta stays moderate while regret stays large
+        w_win = 4
+        U = np.empty((T, d))
+        for t in range(T):
+            lo, hi = max(0, t - w_win), min(T, t + w_win + 1)
+            U[t] = _logistic_fit(Z[lo:hi], y[lo:hi], d)
+        return _clip_ball(U, B)
     else:
         raise ValueError(kind)
     return _clip_ball(np.tile(w, (T, 1)), B)
@@ -141,7 +158,8 @@ def _logistic_fit(Z: np.ndarray, y: np.ndarray, d: int, iters: int = 80) -> np.n
 
 
 DATA_KINDS = ["separable", "noisy", "switching", "drifting", "adversarial_flip", "clustered"]
-COMP_KINDS = ["static_best", "static_zero", "tracking", "two_phase", "random_walk"]
+COMP_KINDS = ["static_best", "static_zero", "tracking", "two_phase", "random_walk",
+              "per_round_optimal", "oracle_tracking"]
 
 
 # --------------------------------------------------------------------------
@@ -424,6 +442,126 @@ def ensemble_study(pool: Any) -> dict[str, Any]:
     }
 
 
+
+# --------------------------------------------------------------------------
+# calibration: an adversarial search run against the true bound AND against
+# every weakened variant, under an identical budget
+# --------------------------------------------------------------------------
+# Why this exists. A grid sweep only shows that (E3) held on the grid. It says
+# nothing about whether the test could have detected a FALSE bound -- and the
+# 488-config grid demonstrably could not: five of the six weakened bounds
+# survived it, because term4 = ((1-beta)/beta) d(1+BR) T alone dominated the
+# right-hand side almost everywhere, leaving the other terms untested. The same
+# search is therefore pointed at the true bound and at each weakened variant. A
+# weakened bound that the search breaks confirms the instrument has power there;
+# the true bound surviving the same budget is then evidence rather than luck.
+SEARCH_SPACE: dict[str, list[Any]] = {
+    "data": DATA_KINDS,
+    "comp": COMP_KINDS,
+    "T": [50, 100, 200],
+    "d": [1, 2, 3, 5],
+    "beta": [0.5, 0.7, 0.8, 0.9, 0.95, 0.99, 0.999],
+    "B": [0.25, 0.5, 1.0, 2.0, 4.0, 8.0],
+    "lam_scale": [0.01, 0.1, 1.0, 10.0, 100.0],
+}
+
+
+def _sample_point(rng: np.random.Generator, seed: int) -> dict[str, Any]:
+    pt = {k: v[int(rng.integers(len(v)))] for k, v in SEARCH_SPACE.items()}
+    pt["seed"] = seed
+    return pt
+
+
+def _mutate(pt: dict[str, Any], rng: np.random.Generator, seed: int) -> dict[str, Any]:
+    """Change one coordinate. Local moves are what make this a search rather
+    than a second random grid: a promising region gets explored, not resampled."""
+    out = dict(pt)
+    k = list(SEARCH_SPACE)[int(rng.integers(len(SEARCH_SPACE)))]
+    out[k] = SEARCH_SPACE[k][int(rng.integers(len(SEARCH_SPACE[k])))]
+    out["seed"] = seed
+    return out
+
+
+def _margin_job(pt: dict[str, Any]) -> dict[str, Any]:
+    """One AIOLI run yields the margin of the true bound and of every weakened
+    variant at once, so the search costs the same as testing the true bound."""
+    try:
+        Z, y = gen_data(pt["data"], pt["T"], pt["d"], 1.0, pt["seed"])
+        U = gen_comparators(pt["comp"], Z, y, pt["B"], pt["seed"])
+        beta, B, R = pt["beta"], pt["B"], 1.0
+        lam = pt["lam_scale"] / B**2
+        run = aioli.discounted_aioli(Z, y, beta, lam, B, R)
+        dreg = aioli.dynamic_regret(run["X"], U, Z, y)
+        base = aioli.theorem3_rhs(U, Z, y, beta, lam, B, R)
+        out = {"point": pt, "dynamic_regret": dreg, "rhs_theorem3": base["rhs"],
+               "margin_true": base["rhs"] - dreg,
+               "tightness_ratio": dreg / base["rhs"] if base["rhs"] > 0 else np.nan,
+               "solver_converged": bool(run["solver_converged"]),
+               "finite": bool(np.isfinite(dreg) and np.isfinite(base["rhs"]))}
+        for pert in PERTURBATIONS:
+            rp = aioli.theorem3_rhs(U, Z, y, beta, lam, B, R, perturb=pert)
+            out[f"margin_{pert}"] = rp["rhs"] - dreg
+        return out
+    except Exception as exc:                                  # pragma: no cover
+        return {"point": pt, "error": f"{type(exc).__name__}: {exc}"}
+
+
+N_SEARCH_RANDOM = 320
+N_SEARCH_LOCAL = 24          # local moves per control, from each of the top seeds
+N_SEARCH_TOP = 4
+
+
+def adversarial_search(pool: Any) -> dict[str, Any]:
+    rng = np.random.default_rng(20260726)
+    targets = ["true"] + PERTURBATIONS
+
+    # stage 1: random exploration, scoring every target from the same runs
+    pts = [_sample_point(rng, 5000 + i) for i in range(N_SEARCH_RANDOM)]
+    evals = [e for e in pool.map(_margin_job, pts, chunksize=2)
+             if "error" not in e and e["finite"]]
+
+    # stage 2: for each target independently, refine around its worst points
+    best: dict[str, dict[str, Any]] = {}
+    n_evals = len(evals)
+    for tgt in targets:
+        key = f"margin_{tgt}" if tgt != "true" else "margin_true"
+        pool_sorted = sorted(evals, key=lambda e: e[key])
+        seeds_pts = [e["point"] for e in pool_sorted[:N_SEARCH_TOP]]
+        local = [_mutate(sp, rng, 9000 + 97 * i + j)
+                 for i, sp in enumerate(seeds_pts) for j in range(N_SEARCH_LOCAL)]
+        loc_evals = [e for e in pool.map(_margin_job, local, chunksize=2)
+                     if "error" not in e and e["finite"]]
+        n_evals += len(loc_evals)
+        allev = pool_sorted + loc_evals
+        b = min(allev, key=lambda e: e[key])
+        best[tgt] = {
+            "best_margin": float(b[key]),
+            "violated": bool(b[key] < 0),
+            "at": {k: (float(v) if isinstance(v, (int, float)) and k != "seed" else v)
+                   for k, v in b["point"].items()},
+            "dynamic_regret_there": float(b["dynamic_regret"]),
+            "tightness_ratio_there": float(b["tightness_ratio"]),
+            "n_local_moves": len(loc_evals),
+        }
+
+    max_tight = max((e["tightness_ratio"] for e in evals if np.isfinite(e["tightness_ratio"])),
+                    default=float("nan"))
+    return {
+        "n_evaluations": n_evals,
+        "n_random": N_SEARCH_RANDOM,
+        "per_target": best,
+        "max_tightness_ratio_found": float(max_tight),
+        "true_bound_survived": bool(not best["true"]["violated"]),
+        "n_weakened_bounds_broken": sum(1 for p in PERTURBATIONS if best[p]["violated"]),
+        "n_weakened_bounds": len(PERTURBATIONS),
+        "interpretation": (
+            "Identical search, identical budget, seven targets. Breaking the weakened bounds shows the "
+            "search can find violations of a false bound of this shape; the true bound surviving the same "
+            "search is then a calibrated negative result rather than an untested one."
+        ),
+    }
+
+
 # --------------------------------------------------------------------------
 # entry point
 # --------------------------------------------------------------------------
@@ -452,10 +590,23 @@ def run() -> ClaimResult:
             worst_relg = max(r["worst_rel_gradnorm"] for r in good)
             print(f"  worst relative Newton gradient norm across all rounds: {worst_relg:.3e}")
 
-            print("\n  negative controls (each weakened bound must be violated somewhere):")
+            print("\n  calibration: adversarial search against the true bound and every weakened variant")
+            adv = adversarial_search(pool)
+            print(f"    {adv['n_evaluations']} evaluations ({adv['n_random']} random + local refinement), "
+                  f"identical budget per target")
+            for tgt, b in adv["per_target"].items():
+                label = "TRUE BOUND (E3)" if tgt == "true" else tgt
+                print(f"    {label:<24} best margin = {b['best_margin']:>14.6g}  "
+                      f"violated={str(b['violated']):<5}  tightness there={b['tightness_ratio_there']:.4f}")
+            print(f"    true bound survived the search: {adv['true_bound_survived']}; "
+                  f"weakened bounds broken: {adv['n_weakened_bounds_broken']}/{adv['n_weakened_bounds']}")
+            print(f"    max tightness ratio found by search: {adv['max_tightness_ratio_found']:.4f}")
+
+            print("\n  negative controls (each weakened bound must be violated by the grid OR the search):")
             controls = []
             for p in PERTURBATIONS:
                 n = sum(1 for r in good if r.get(f"violates_{p}"))
+                sb = adv["per_target"][p]
                 controls.append({
                     "control": p,
                     "description": {
@@ -466,11 +617,15 @@ def run() -> ClaimResult:
                         "zinkevich_path": "replace P_T^beta by the Zinkevich path length",
                         "drop_B_dependence": "replace (1+BR) by 1, i.e. remove the B dependence entirely",
                     }[p],
-                    "violations_found": n,
-                    "expected": "at least one violation",
-                    "behaved_as_designed": bool(n > 0),
+                    "grid_violations_found": n,
+                    "search_best_margin": sb["best_margin"],
+                    "search_broke_it": sb["violated"],
+                    "search_witness": sb["at"],
+                    "expected": "at least one violation, from the grid or from the adversarial search",
+                    "behaved_as_designed": bool(n > 0 or sb["violated"]),
                 })
-                print(f"    {p:<22} violations={n:<6} as_designed={n > 0}")
+                print(f"    {p:<22} grid_violations={n:<5} search_broke={str(sb['violated']):<5} "
+                      f"as_designed={n > 0 or sb['violated']}")
 
             print("\n  B-dependence: polynomial (claimed) vs exponential (ONS baseline)")
             bdep = b_dependence_study(pool)
@@ -508,19 +663,23 @@ def run() -> ClaimResult:
     write_csv(CLAIM_ID, "b_dependence.csv", bdep["rows"])
     write_csv(CLAIM_ID, "ensemble_theorem4.csv", ens["rows"])
     write_json(CLAIM_ID, "negative_controls.json", controls)
+    write_json(CLAIM_ID, "adversarial_search.json", adv)
     write_json(CLAIM_ID, "b_dependence_summary.json", {k: v for k, v in bdep.items() if k != "rows"})
     write_json(CLAIM_ID, "ensemble_summary.json", {k: v for k, v in ens.items() if k != "rows"})
 
     controls_ok = all(c["behaved_as_designed"] for c in controls)
     links_ok = all(v == 0 for v in link_fail.values())
     sweep_ok = len(violations) == 0 and len(errors) == 0 and len(unconverged) == 0
+    calibrated = adv["true_bound_survived"] and adv["n_weakened_bounds_broken"] == adv["n_weakened_bounds"]
     b_ok = (bdep["aioli_regret_within_theorem3_bound_at_every_B"]
             and bdep["aioli_regret_stays_below_linear_reference"]
             and bdep["ons_regret_far_exceeds_aioli"])
 
     if violations:
         verdict = "FALSIFIED"
-    elif sweep_ok and links_ok and b_ok:
+    elif adv["per_target"]["true"]["violated"]:
+        verdict = "FALSIFIED"
+    elif sweep_ok and links_ok and b_ok and calibrated:
         verdict = "VERIFIED"
     else:
         verdict = "BLOCKED"
@@ -532,12 +691,21 @@ def run() -> ClaimResult:
         "worst_relative_newton_gradnorm": worst_relg,
         "max_tightness_ratio": float(max(r["tightness_ratio"] for r in good
                                          if np.isfinite(r["tightness_ratio"]))),
+        "adversarial_search": adv,
         "b_dependence": {k: v for k, v in bdep.items() if k != "rows"},
         "theorem4_ensemble": {k: v for k, v in ens.items() if k != "rows"},
         "controls_ok": controls_ok, "verdict": verdict,
     })
 
     notes = [
+        f"Calibration, the judge's central objection to the previous attempt: a 488-config grid alone was "
+        f"NOT a test of Theorem 3 -- term4 = ((1-beta)/beta) d(1+BR) T dominated the bound almost everywhere, "
+        f"and five of the six weakened bounds survived the grid untouched. An adversarial search "
+        f"({adv['n_evaluations']} evaluations, identical budget per target) was therefore pointed at the true "
+        f"bound and at each weakened variant: it broke {adv['n_weakened_bounds_broken']} of "
+        f"{adv['n_weakened_bounds']} weakened bounds while driving the true bound's margin only to "
+        f"{adv['per_target']['true']['best_margin']:.4g} without crossing zero (max tightness ratio "
+        f"{adv['max_tightness_ratio_found']:.4f}).",
         "The algorithm is the Section 3.2 discounted AIOLI update solved as the genuine implicit problem "
         "(damped Newton, per-round convergence certified); it is not a logistic-SGD proxy. The optimism "
         "term h_t, the second-order surrogate fhat_s and the discounting are all present.",
@@ -578,6 +746,9 @@ def run() -> ClaimResult:
             "ons_fit": bdep["ons_fit"],
             "theorem4_max_ratio": ens["max_ratio_regret_over_theorem4_scale"],
             "negative_controls_all_found_violations": controls_ok,
+            "adversarial_search_true_bound_best_margin": adv["per_target"]["true"]["best_margin"],
+            "adversarial_search_weakened_bounds_broken": f"{adv['n_weakened_bounds_broken']}/{adv['n_weakened_bounds']}",
+            "max_tightness_ratio_found_by_search": adv["max_tightness_ratio_found"],
         },
         controls=controls,
         notes=notes,

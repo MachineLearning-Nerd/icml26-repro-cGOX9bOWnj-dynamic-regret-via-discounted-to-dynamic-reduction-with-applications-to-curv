@@ -211,6 +211,30 @@ def check_claim3(lines: list[str]) -> bool:
     lines.append(f"claim3 controls: {len(controls)} weakened bounds, none-fired={dead or 'none'}")
     ok &= not dead and len(controls) >= 5
 
+    # --- 5b. calibration: the search must have had power, and must not have
+    #         quietly used a smaller budget against the true bound than against
+    #         the weakened ones (which would manufacture a "survived" result)
+    adv = _read_json(claim, "adversarial_search.json")
+    tgts = adv["per_target"]
+    broke = [p for p in tgts if p != "true" and tgts[p]["violated"]]
+    survived = [p for p in tgts if p != "true" and not tgts[p]["violated"]]
+    budgets = {p: tgts[p]["n_local_moves"] for p in tgts}
+    equal_budget = max(budgets.values()) - min(budgets.values()) <= 0.25 * max(budgets.values())
+    lines.append(f"claim3 calib   : {adv['n_evaluations']} evaluations; weakened bounds broken "
+                 f"{len(broke)}/{len(tgts) - 1} (survived: {survived or 'none'}); "
+                 f"true bound best margin {tgts['true']['best_margin']:.6g}; "
+                 f"equal search budget across targets={equal_budget}")
+    ok &= equal_budget
+    ok &= (len(broke) == len(tgts) - 1) == bool(
+        adv["n_weakened_bounds_broken"] == adv["n_weakened_bounds"])
+    ok &= (tgts["true"]["best_margin"] >= 0) == bool(adv["true_bound_survived"])
+
+    # A "survived" result is only meaningful if the search actually approached
+    # the bound. A max tightness ratio near zero would mean it never got close.
+    lines.append(f"claim3 tight   : max tightness ratio found by search "
+                 f"{float(adv['max_tightness_ratio_found']):.4f} "
+                 f"(near 0 would mean the search never approached the bound)")
+
     # --- 6. B-dependence gates recomputed from the raw per-B table
     bd = _read_csv(claim, "b_dependence.csv")
     bsum = _read_json(claim, "b_dependence_summary.json")
