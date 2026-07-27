@@ -281,6 +281,20 @@ def make_setting(
     p = params_fn(eps, c, G, sigma, F_star, beta2=b2, nu=nu_scale * (G + sigma))
     in_relaxed_band = bool(b1**4 <= b2 < b1**2)
     satisfies = bool(b2 >= p["beta2_lower_bound"] - 1e-15)
+
+    # Fail fast, locally, on a setting that is meant to be admissible but is not.
+    # 'lower', 'standard' and 'high' all claim to sit inside the theorem's region;
+    # 'relaxed_*' deliberately explore the band Theorem 5 opens, and 'violating'
+    # is a negative control, so those are exempt. Without this guard an
+    # inadmissible setting is only caught by the independent checker at the END
+    # of a multi-hour run -- which is exactly what happened twice, scoring 10 of
+    # 52 settings against a precondition they violated.
+    if beta2_choice in ("lower", "standard", "high") and not satisfies:
+        raise ValueError(
+            f"make_setting({beta2_choice!r}, {objective}, d={d}): beta_2={b2!r} is below the "
+            f"theorem's lower bound {p['beta2_lower_bound']!r}. This setting would be scored "
+            "against a theorem that does not cover it."
+        )
     out = {
         "objective": objective, "d": d, "variant": variant, "eps": eps, "c": c,
         "sigma": sigma if sigma_actual is None else sigma_actual, "G": G, "F_star": F_star,
