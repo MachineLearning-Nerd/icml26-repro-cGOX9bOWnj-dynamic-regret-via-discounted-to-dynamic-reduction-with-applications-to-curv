@@ -1,0 +1,30 @@
+{
+  "claim_id": "claim2_theorem2",
+  "claim_type": "universally quantified over an infinite domain; finite experiments are scoped corroboration only",
+  "exact_statement": {
+    "conclusion": "(E): D-Reg_T(u_{1:T}) <= the explicit right-hand side of Theorem 2, whose terms are the initial-regularisation term, the log-determinant (elliptical potential) term, the (beta/(1-beta)) P_T^beta path term, and the (1-beta)/beta horizon term. P_T^beta is Eq.(4), measured in LOSS DIFFERENCES with normalised geometric weights p^beta_{t,s} = beta^{t-s} / sum_{tau<=t} beta^{t-tau} and f_0 := phi -- explicitly NOT the Zinkevich path length sum ||u_{t+1} - u_t||.",
+    "quantifiers": "for all T >= 1; for all beta in (0,1); for all lambda > 0; for all d >= 1; for all label/feature sequences with the stated norm bounds; for all comparator sequences u_1..u_T"
+  },
+  "informal_statement": "The discounted Vovk-Azoury-Warmuth forecaster attains a dynamic regret bound with a log-determinant term and a comparator-variation term measured by P_T^beta.",
+  "non_circularity": "No formula-derived quantity is used as the primary evidence for the formula it comes from. Where a finite experiment cannot establish a universally quantified statement, the verdict is BLOCKED rather than VERIFIED.",
+  "numerical_hazard": "the literal Lambda_t = beta^{-2t} y_t^2 z_t^T A_t^{-1} z_t overflows (beta=0.99, t=3000 gives ~1e26). A verifier computing it directly reports inf/nan and then 'passes' VACUOUSLY. All quantities are computed in beta^t-rescaled form.",
+  "paper": {
+    "anchor": "Section 3.1, Theorem 2 (discounted VAW dynamic regret); proof in the appendix via Eq.(12) and Lemma 25",
+    "arxiv_id": "2602.08372",
+    "openreview_id": "cGOX9bOWnj",
+    "retrieved_utc": "2026-07-26T15:40:21Z",
+    "source_sha256": "a9843091cac480a52e744171eb378e75632afeda60140fcddd518da41b057fc3",
+    "source_url": "https://ar5iv.labs.arxiv.org/html/2602.08372",
+    "title": "Dynamic Regret via Discounted-to-Dynamic Reduction with Applications to Curved Losses and Adam Optimizer"
+  },
+  "verdict_rule": "VERIFIED requires (E) to survive AND every derivation link to hold. Because L3 (Lemma 25) is FALSE as stated, the published derivation does not close, so the verdict is BLOCKED even though (E) survived every attack.",
+  "verification_design": {
+    "calibration": "adversarial search maximising (regret - bound) against the true bound and against 5 weakened bounds under an identical budget",
+    "derivation_links": "L1 rescaled hypothesis, L2 Theorem 1 applied, L3 log-determinant (Lemma 25), L4 log inequality, L5 path-to-P conversion, each checked per configuration",
+    "independent_algorithm_check": "5 configurations re-run through a from-scratch VAW implementation that uses no recursion",
+    "rate_subclaim": "the asymptotic O(d log T + sqrt(dTP)) rate is derived ALGEBRAICALLY from (E) via min_q (P/q + qV) = 2 sqrt(PV); it is deliberately NOT measured as an empirical slope, because a formula-derived slope would be circular",
+    "route_4_falsification": "320 restarts seeded inside the region where Lemma 25 fails",
+    "sweep": "987 configurations across 9 data generators x 7 comparator strategies x regimes A-E, each regime engineered so that a DIFFERENT term of the right-hand side is the binding one"
+  },
+  "what_would_falsify_it": "one instance satisfying every stated assumption (norm bounds, beta in (0,1), lambda > 0) with dynamic regret strictly exceeding the stated right-hand side"
+}

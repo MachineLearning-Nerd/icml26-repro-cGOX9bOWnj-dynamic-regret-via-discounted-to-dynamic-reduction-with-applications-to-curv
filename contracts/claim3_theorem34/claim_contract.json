@@ -1,0 +1,28 @@
+{
+  "claim_id": "claim3_theorem34",
+  "claim_type": "universally quantified over an infinite domain; finite experiments are scoped corroboration only",
+  "exact_statement": {
+    "conclusion": "(E3): D-Reg_T <= beta lambda ||u_1||^2 + d(1+BR) log(1 + R^2 (sum_t beta^{T-t})/(d lambda (1+BR))) + (beta/(1-beta)) P_T^beta + ((1-beta)/beta) d(1+BR) T. Theorem 4: the Algorithm 1 two-layer ensemble over beta_i = eta_i/(1+eta_i) attains O(dB log(BT) + sqrt(dBT P_T^{beta*})).",
+    "quantifiers": "for all T >= 1; beta in (0,1); lambda > 0; d >= 1; ||z_t|| <= R; comparators ||u_t|| <= B; decisions unconstrained in R^d"
+  },
+  "informal_statement": "Discounted AIOLI for online logistic regression attains a dynamic regret bound whose dependence on the comparator norm B is only through the factor (1+BR), i.e. linear -- avoiding the e^B degradation that proper online Newton step suffers.",
+  "known_power_limitation": "3 of 6 weakened bounds cannot be broken (drop_B_dependence 98.9%, zinkevich_path 93.4%, halve_log_term 51.1% of the slack they need). Structural, not budget: a moving comparator makes term3 = (beta/(1-beta))P_T^beta dominate by ~3 orders of magnitude, while a static comparator makes improper AIOLI beat the comparator outright and regret go negative. Consequence: (E3) is corroborated only up to the constant in its log term and its stated B-dependence; those parts are UNTESTED, not confirmed.",
+  "non_circularity": "No formula-derived quantity is used as the primary evidence for the formula it comes from. Where a finite experiment cannot establish a universally quantified statement, the verdict is BLOCKED rather than VERIFIED.",
+  "paper": {
+    "anchor": "Section 3.2, Theorem 3 (explicit bound E3) and Theorem 4 (asymptotic rate for the Algorithm 1 ensemble)",
+    "arxiv_id": "2602.08372",
+    "openreview_id": "cGOX9bOWnj",
+    "retrieved_utc": "2026-07-26T15:40:21Z",
+    "source_sha256": "a9843091cac480a52e744171eb378e75632afeda60140fcddd518da41b057fc3",
+    "source_url": "https://ar5iv.labs.arxiv.org/html/2602.08372",
+    "title": "Dynamic Regret via Discounted-to-Dynamic Reduction with Applications to Curved Losses and Adam Optimizer"
+  },
+  "verdict_rule": "VERIFIED requires no violations AND all links AND every weakened bound broken. The last fails by measurement, so the verdict is BLOCKED.",
+  "verification_design": {
+    "algorithm": "the Section 3.2 implicit update solved as the genuine implicit problem by damped Newton with backtracking and PER-ROUND convergence certification -- not a logistic-SGD proxy. Undamped Newton diverged here (dreg 1.4e8); that was a solver bug, not a finding, which is why convergence is certified.",
+    "b_dependence": "AIOLI vs a real ONS baseline over B in [0.5,10], stated in LEVELS against an explicit linear-in-B reference because AIOLI is improper and its regret legitimately goes negative, making ratio-of-growth statistics meaningless",
+    "calibration": "2336-evaluation adversarial search (random + 3 hill-climbing rounds), identical budget against the true bound and all 6 weakened bounds, with a POWER RATIO recorded per control = (bound removed)/(slack available); >1 is needed to fire",
+    "sweep": "680 configurations over 6 data generators x 7 comparator strategies, including per_round_optimal (u_t on the ball boundary aligned with y_t z_t, the exact per-round minimiser and hence the strongest admissible comparator)"
+  },
+  "what_would_falsify_it": "one assumption-satisfying instance with dynamic regret strictly exceeding (E3)"
+}

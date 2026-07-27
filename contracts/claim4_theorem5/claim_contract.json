@@ -1,0 +1,29 @@
+{
+  "claim_id": "claim4_theorem5",
+  "claim_type": "universally quantified over an infinite domain; finite experiments are scoped corroboration only",
+  "exact_statement": {
+    "conclusion": "E_{t ~ Unif[T]} ||grad F(xbar_t)||_c <= eps, with ||grad F(x)||_c = inf over couplings P with E[y]=x of ||E grad F(y)|| + c E||y-x||^2",
+    "quantifiers": "for all eps > 0; c > 0; d >= 1; objectives F satisfying Assumptions 1-4; beta_2 in the theorem's stated band; T at least the theorem's stated complexity"
+  },
+  "informal_statement": "Running Algorithm 2 (Exponentiated O2NC) with Theorem 5 (clipped Adam, Eq. 8) for the theorem's own T yields E[||grad F(x)||_c] <= eps, where ||.||_c is the (c,eps)-stationarity measure. the novelty is the RELAXED condition beta_2 in [beta_1^4, beta_1^2), a band that prior beta_2 >= beta_1^2 analyses forbid.",
+  "non_circularity": "No formula-derived quantity is used as the primary evidence for the formula it comes from. Where a finite experiment cannot establish a universally quantified statement, the verdict is BLOCKED rather than VERIFIED.",
+  "paper": {
+    "anchor": "Section 4, Theorem 5 (clipped Adam, Eq. 8)",
+    "arxiv_id": "2602.08372",
+    "openreview_id": "cGOX9bOWnj",
+    "retrieved_utc": "2026-07-26T15:40:21Z",
+    "source_sha256": "a9843091cac480a52e744171eb378e75632afeda60140fcddd518da41b057fc3",
+    "source_url": "https://ar5iv.labs.arxiv.org/html/2602.08372",
+    "title": "Dynamic Regret via Discounted-to-Dynamic Reduction with Applications to Curved Losses and Adam Optimizer"
+  },
+  "verdict_rule": "VERIFIED requires no failures at the theorem's own T AND every negative control to fail as intended. A control that does not fire means the test has no power and forces BLOCKED.",
+  "verification_design": {
+    "acceptance": "mean + 2 standard errors over independent runs must be <= eps (conservative)",
+    "algorithm": "Algorithm 2 exactly: Exp(1) step scaling s_t, the EMA output xbar_t = (beta-beta^t)/(1-beta^t) xbar_{t-1} + (1-beta)/(1-beta^t) x_t, and the stated Adam update",
+    "assumption_audit": "Assumptions 1 and 4 are re-checked NUMERICALLY per objective rather than assumed from construction. This caught a real error: asym_valley's Lipschitz constant had been eyeballed and failed its own audit until G_F was computed from ||Q||_op, sqrt(d) and the numerically maximised |h(z)|.",
+    "measure": "||grad F||_c is an INFIMUM over couplings, so it is upper-bounded by Gaussian smoothing; by Jensen this is conservative, i.e. the test can only be harder than the theorem requires, never easier",
+    "non_vacuity_gate": "eps = 0.6 * ||grad F(x_0)||_c, and every setting must START above eps. Without this the test is vacuous: an earlier draft started at approximately stationary points and 'passed' at T = 2 as easily as at the theorem's T.",
+    "parallelism_note": "runs are vectorised over the run axis for speed; this is validated against the scalar path (|z| <= 0.93 across objectives and both variants) and preserves per-run objective draws and start points"
+  },
+  "what_would_falsify_it": "an objective satisfying Assumptions 1-4, with parameters from the theorem's own formulas and T at least the theorem's T, for which the expectation exceeds eps"
+}

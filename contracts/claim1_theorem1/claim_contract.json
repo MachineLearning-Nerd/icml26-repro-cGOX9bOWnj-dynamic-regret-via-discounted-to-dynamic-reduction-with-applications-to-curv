@@ -1,0 +1,48 @@
+{
+  "claim_id": "claim1_theorem1",
+  "paper": {
+    "arxiv_id": "2602.08372",
+    "openreview_id": "cGOX9bOWnj",
+    "title": "Dynamic Regret via Discounted-to-Dynamic Reduction with Applications to Curved Losses and Adam Optimizer",
+    "source_url": "https://ar5iv.labs.arxiv.org/html/2602.08372",
+    "source_sha256": "a9843091cac480a52e744171eb378e75632afeda60140fcddd518da41b057fc3",
+    "retrieved_utc": "2026-07-26T15:40:21Z",
+    "anchor": "Section 2.2, Theorem 1 (Modular D2D Reduction); proof in Appendix B.2"
+  },
+  "informal_statement": "Theorem 1 gives a modular discounted-to-dynamic reduction converting a rescaled-regret bound into an explicit dynamic regret bound via stability terms Lambda_s and comparator variation.",
+  "exact_statement": {
+    "quantifiers": "for all T >= 1; for all beta in (0,1]; for all sequences f_1..f_T of functions on X; for all x_1..x_T in X; for all u_1..u_T in X; for all phi_1..phi_T and Lambda_1..Lambda_T",
+    "hypothesis_H": "for every t in [T] and every u in X: sum_{s=1..t} beta^{-s} f_s(x_s) - sum_{s=1..t} beta^{-s} f_s(u) <= phi_t(u) + sum_{s=1..t} Lambda_s,  with Lambda_s >= 0 and phi_t(.) >= 0",
+    "conclusion_C": "sum_{t=1..T} f_t(x_t) - sum_{t=1..T} f_t(u_t) <= beta*phi_1(u_1) + sum_{t=1..T} beta^t Lambda_t + beta*sum_{t=1..T-1} (F_t(u_{t+1}) - F_t(u_t)) + beta*sum_{t=1..T-1} beta^t (phi_{t+1}(u_{t+1}) - phi_t(u_{t+1}))",
+    "definitions": {
+      "F_t(u)": "beta^t phi_t(u) + sum_{s=1..t} beta^{t-s} f_s(u)",
+      "Reg_{t;beta}(u)": "sum_{s=1..t} beta^{t-s} ( f_s(x_s) - f_s(u) )",
+      "P_T^beta": "sum_{t=1..T-1} sum_{s=0..t} p^beta_{t,s} [ f_s(u_{t+1}) - f_s(u_t) ]_+ with p^beta_{t,s} = beta^{t-s} / sum_{tau=0..t} beta^{t-tau}, f_0 := phi (used only in the corollary bounding the path term, not in Theorem 1 itself)"
+    }
+  },
+  "claim_type": "universally quantified algebraic implication (not an empirical regularity)",
+  "what_would_falsify_it": "a single instance (T, beta in (0,1], f, x, u, phi, Lambda) that satisfies hypothesis H at every t and every u, yet violates conclusion C",
+  "verification_design": {
+    "primary": "machine-checkable proof certificate: RHS(C) - LHS(C) == (1-beta) * sum_{t=1..T} S_t(u_t) + beta * S_T(u_T), where S_t(u) = beta^t phi_t(u) + beta^t sum_{s<=t} Lambda_s - Reg_{t;beta}(u) >= 0 is exactly hypothesis H. Certificate coefficients (1-beta) and beta are nonnegative precisely on the stated domain beta in [0,1], so the identity proves the theorem.",
+    "route_a": "exhaustive exact symbolic verification of the certificate identity for every T in [1,20] over free symbols with no numeric substitution",
+    "route_b": "general-T proof by coefficient matching: the identity is linear in its free symbols; the five symbol classes are enumerated exhaustively and each closed-form coefficient identity is verified symbolically with T, s, k free integer symbols. Routes A and B together cover all T >= 1.",
+    "route_c": "exact rational-arithmetic instance cross-check on 4000 randomly generated hypothesis-satisfying instances (fractions.Fraction; no floating point), guarding against a mis-transcription of the theorem statement",
+    "negative_controls": [
+      "halve_phi1 - halve the beta*phi_1(u_1) term: certificate must break",
+      "drop_lambda - delete sum_t beta^t Lambda_t: certificate must break",
+      "drop_path - delete the F_t path term: certificate must break",
+      "drop_phidrift - delete the phi drift term: certificate must break",
+      "beta_squared_lambda - replace beta^t Lambda_t by beta^{2t} Lambda_t: certificate must break",
+      "hypothesis_only_at_T - assume H only at t=T rather than every t: an explicit counterexample to C must exist, proving the per-round hypothesis is load-bearing"
+    ]
+  },
+  "non_circularity": "The certificate is derived from the Appendix B.2 proof but is checked as an independent algebraic identity over free symbols; nothing about the data, horizon, or tolerance is chosen using the formula being tested. Route C generates instances from arbitrary rationals and then constructs phi to satisfy H, rather than constructing instances from the conclusion.",
+  "pass_condition": "route A holds for every T in [1,20] AND route B holds for all five symbol classes AND route C reports zero violations AND every negative control breaks as designed",
+  "verdict_if_pass": "VERIFIED",
+  "verdict_if_counterexample": "FALSIFIED",
+  "verdict_otherwise": "BLOCKED",
+  "seeds": {"route_c": 20260726, "hypothesis_control": 7, "independent_checker": 31337},
+  "verifier": "repro/claim1_theorem1.py",
+  "independent_checker": "repro/checker.py::check_claim1",
+  "command": "bash scripts/run.sh"
+}

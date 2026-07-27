@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import shutil
 import sys
 import time
 
@@ -30,9 +31,36 @@ CLAIM_MODULES = [
 ]
 
 
+def _publish_contracts() -> int:
+    """Copy the tracked static evidence documents into the artifact tree.
+
+    .openresearch/ is excluded from git by orx, so anything written only there
+    is invisible to the job and to the log dump -- i.e. the claim contracts and
+    the source audit would never actually reach a reviewer. They live in
+    contracts/ (tracked, reviewable in the diff) and are published here so the
+    inline artifact dump carries them alongside the results they constrain.
+    """
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "contracts")
+    if not os.path.isdir(src):
+        print("[suite] WARNING: contracts/ not found -- claim contracts will be MISSING "
+              "from the evidence dump", flush=True)
+        return 0
+    n = 0
+    for root, _dirs, files in os.walk(src):
+        for f in files:
+            rel = os.path.relpath(os.path.join(root, f), src)
+            dst = os.path.join(ARTIFACT_ROOT, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copyfile(os.path.join(root, f), dst)
+            n += 1
+    print(f"[suite] published {n} static evidence documents from contracts/", flush=True)
+    return n
+
+
 def main() -> int:
     t_start = time.time()
     os.makedirs(ARTIFACT_ROOT, exist_ok=True)
+    _publish_contracts()
 
     banner("REPRODUCTION SUITE - arXiv 2602.08372 (cGOX9bOWnj)")
     stamp = environment_stamp()
