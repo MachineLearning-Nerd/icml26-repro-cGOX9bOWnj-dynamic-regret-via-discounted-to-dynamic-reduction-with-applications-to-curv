@@ -411,6 +411,48 @@ def check_claim2(lines: list[str]) -> bool:
         f"(no recursion), dynamic-regret mismatches={mismatches}"
     )
     ok &= mismatches == 0 and sampled > 0
+def _check_adam_claim(lines: list[str], claim: str, label: str) -> bool:
+    """Shared independent check for Claims 4 and 5 (Theorems 5 and 7)."""
+    import numpy as np
+
+    ok = True
+    rows = _read_csv(claim, "settings_results.csv")
+    summary = _read_json(claim, "summary.json")
+
+    # 1. recompute the acceptance test from the stored raw per-run values
+    per_run = _read_json(claim, "per_run_values.json")
+    mismatches = 0
+    for r, pr in zip(rows, per_run):
+        means = np.array(pr["per_run_means"])
+        est = means.mean()
+        se = means.std(ddof=1) / np.sqrt(len(means))
+        if not np.isclose(est, float(r["E_grad_c_upper_estimate"]), rtol=1e-9):
+            mismatches += 1
+        elif not np.isclose(est + 2 * se, float(r["E_grad_c_upper_2se"]), rtol=1e-9):
+            mismatches += 1
+    lines.append(f"{label} stats  : {len(rows)} settings, mean+2SE recomputed from raw per-run values, "
+                 f"mismatches={mismatches}")
+    ok &= mismatches == 0
+
+    # 2. NON-VACUITY: every setting must start strictly outside the target set,
+    #    or "the conclusion held" says nothing about the algorithm
+    vac = [r for r in rows if r["non_vacuous"] != "True"]
+    ratios = [float(r["initial_grad_c_upper"]) / float(r["eps"]) for r in rows]
+    lines.append(f"{label} vacuity: {len(vac)} vacuous settings (start already inside the target); "
+                 f"min ||grad F(x0)||_c / eps = {min(ratios):.3f} (must exceed 1)")
+    ok &= len(vac) == 0 and min(ratios) > 1.0
+
+    # 3. the conclusion, recomputed rather than read off
+    fails = sum(1 for r in rows if float(r["E_grad_c_upper_2se"]) > float(r["eps"]))
+    lines.append(f"{label} concl  : recomputed failures={fails}, verifier reported {summary['n_failures']}")
+    ok &= fails == summary["n_failures"]
+
+    # 4. assumptions genuinely audited
+    aud = _read_json(claim, "assumption_audit.json")
+    aud_ok = all(a["A1_holds"] and a["A4_variance_holds"] and a["A4_bounded_holds"]
+                 and a["A4_unbiased_within_mc_error"] for a in aud)
+    lines.append(f"{label} assump : {len(aud)} objective/dimension pairs audited, all satisfy A1 and A4={aud_ok}")
+    ok &= aud_ok
 
     # 5. controls
     ctl = _read_json(claim, "negative_controls.json")
@@ -434,10 +476,51 @@ def check_claim2(lines: list[str]) -> bool:
     return ok
 
 
+    lines.append(f"{label} ctrls  : {len(ctl)} controls "
+                 f"({', '.join(c['control'] for c in ctl)}), all failed as intended={ctl_ok}")
+    ok &= ctl_ok
+
+    comp = _read_json(claim, "complexity_symbolic.json")
+    comp_ok = comp["branch1_is_constant_multiple"] and comp["branch2_is_constant_multiple"]
+    lines.append(f"{label} complx : T formula is a constant multiple of the claimed order={comp_ok} "
+                 f"(branch1 ratio {comp['branch1_over_target']})")
+    ok &= comp_ok
+    return ok
+
+
+def check_claim4(lines: list[str]) -> bool:
+    ok = _check_adam_claim(lines, "claim4_theorem5", "claim4")
+    rows = _read_csv("claim4_theorem5", "settings_results.csv")
+    # the claim's novelty: settings must actually sit in the relaxed-only band
+    relaxed = [r for r in rows if r["beta2_band"] == "relaxed_only"]
+    fails = sum(1 for r in relaxed if float(r["E_grad_c_upper_2se"]) > float(r["eps"]))
+    # and that band must be genuinely below beta_1^2
+    ok_band = all(float(r["beta2"]) < float(r["beta1"]) ** 2 for r in relaxed)
+    lines.append(
+        f"claim4 band   : {len(relaxed)}/{len(rows)} settings inside [beta_1^4, beta_1^2) -- the band prior "
+        f"beta_2 >= beta_1^2 conditions forbid -- with {fails} failures; all strictly below beta_1^2={ok_band}"
+    )
+    return ok and len(relaxed) > 0 and fails == 0 and ok_band
+
+
+def check_claim5(lines: list[str]) -> bool:
+    ok = _check_adam_claim(lines, "claim5_theorem7", "claim5")
+    rows = _read_csv("claim5_theorem7", "settings_results.csv")
+    # Theorem 7 keeps the standard condition: every setting must satisfy it
+    ok_cond = all(float(r["beta2"]) >= float(r["beta2_lower_bound"]) - 1e-12 for r in rows)
+    mus = {float(r["mu"]) for r in rows}
+    lines.append(f"claim5 cond   : all {len(rows)} settings satisfy beta_2 >= max(1-nu/(G+sigma), beta_1^2)"
+                 f"={ok_cond}; damping mu values used: {len(mus)} distinct, all > 0="
+                 f"{all(m > 0 for m in mus)}")
+    return ok and ok_cond and all(m > 0 for m in mus)
+
+
 CHECKS: dict[str, Callable[[list[str]], bool]] = {
     "claim1_theorem1": check_claim1,
     "claim2_theorem2": check_claim2,
     "claim3_theorem34": check_claim3,
+    "claim4_theorem5": check_claim4,
+    "claim5_theorem7": check_claim5,
 }
 
 
