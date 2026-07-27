@@ -259,6 +259,44 @@ def run_o2nc(
     return {"snapshots": snaps[:k], "snapshot_rounds": snap_idx[:k], "x_final": x, "xbar_final": xbar}
 
 
+class StackedObjective:
+    """Presents S per-run Objectives as one objective with a batched gradient.
+
+    Only asym_valley actually differs between runs (its random matrix Q), and
+    that difference is what forced it onto the slow per-run path, where it was
+    ~9 minutes per setting instead of seconds. Its gradient is
+    h(Qx)^T Q with h(z) = tanh z - 0.3(1 - tanh^2 z), which batches cleanly over
+    a per-run Q, so the stacked form is exactly the same function evaluated
+    row-wise -- no approximation, and each run keeps its own Q.
+    """
+
+    def __init__(self, objs: list[Objective]):
+        kinds = {o.kind for o in objs}
+        if len(kinds) != 1:
+            raise ValueError(f"cannot stack objectives of mixed kinds: {kinds}")
+        self.objs = objs
+        self.kind = objs[0].kind
+        self.d = objs[0].d
+        self.sigma = objs[0].sigma
+        self.Q = np.stack([o.Q for o in objs]) if self.kind == "asym_valley" else None
+
+    def grad(self, X: np.ndarray) -> np.ndarray:
+        if self.kind != "asym_valley":
+            # every other objective is fully determined by (kind, d, sigma), so
+            # all runs share one function and the existing batched grad applies
+            return self.objs[0].grad(X)
+        Z = np.einsum("sij,sj->si", self.Q, X)
+        Th = np.tanh(Z)
+        H = Th - 0.3 * (1.0 - Th**2)
+        return np.einsum("si,sij->sj", H, self.Q)
+
+    def stoch_grad(self, x: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+        xi = rng.standard_normal(x.shape)
+        n = np.linalg.norm(xi, axis=1, keepdims=True)
+        xi = np.divide(xi, n, out=np.zeros_like(xi), where=n > 0) * self.sigma
+        return self.grad(x) + xi
+
+
 def run_o2nc_batch(
     obj: Objective,
     x0: np.ndarray,

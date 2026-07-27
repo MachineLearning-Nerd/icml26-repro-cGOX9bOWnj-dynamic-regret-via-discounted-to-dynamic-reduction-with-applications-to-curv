@@ -137,31 +137,32 @@ def _setting_runs(job: dict[str, Any]) -> dict[str, Any]:
     # only runs sharing an objective are vectorised together -- asym_valley falls
     # back to groups of one rather than having its Q silently frozen.
     obj_seeds = [17 + i for i in range(n_runs)]
-    groups: dict[int, list[int]] = {}
-    for i, os_ in enumerate(obj_seeds):
-        groups.setdefault(os_ if kind == "asym_valley" else 0, []).append(i)
-
-    outs: list[dict[str, Any]] = [None] * n_runs        # type: ignore[list-item]
-    for gkey, idxs in groups.items():
-        obj = o2nc.Objective(kind, d, sigma_run, seed=obj_seeds[idxs[0]])
-        X0 = np.stack([_start_point(kind, d, obj_seeds[i]) for i in idxs])
-        res = o2nc.run_o2nc_batch(
-            obj, X0, setting["T"], setting["beta1"], setting["beta2"], setting["gamma"],
-            setting["nu"], setting["D"], setting["variant"], n_runs=len(idxs),
-            mu=setting["mu"], seed=job["seed"] + 7 * gkey, n_snapshots=N_SNAPSHOTS,
-        )
-        for r, i in zip(res, idxs):
-            vals = [o2nc.grad_norm_c_upper(obj, x, setting["c"], n_mc=192,
-                                           seed=(job["seed"] + i) * 7919 + k)
-                    for k, x in enumerate(r["snapshots"])]
-            outs[i] = {
-                "run_seed": job["seed"] + i,
-                "obj_seed": obj_seeds[i],
-                "mean_grad_c_upper": float(np.mean(vals)),
-                "max_grad_c_upper": float(np.max(vals)),
-                "n_snapshots": len(vals),
-                "final_F": float(obj.F(r["xbar_final"])),
-            }
+    objs = [o2nc.Objective(kind, d, sigma_run, seed=s) for s in obj_seeds]
+    # StackedObjective evaluates each run against ITS OWN objective (for
+    # asym_valley, its own Q) inside a single batched call, so every objective
+    # now runs at batched speed while keeping the per-run draws the scalar path
+    # made. Snapshot scoring below still uses each run's individual objective.
+    stacked = o2nc.StackedObjective(objs)
+    X0 = np.stack([_start_point(kind, d, s) for s in obj_seeds])
+    res = o2nc.run_o2nc_batch(
+        stacked, X0, setting["T"], setting["beta1"], setting["beta2"], setting["gamma"],
+        setting["nu"], setting["D"], setting["variant"], n_runs=n_runs,
+        mu=setting["mu"], seed=job["seed"], n_snapshots=N_SNAPSHOTS,
+    )
+    outs: list[dict[str, Any]] = []
+    for i, r in enumerate(res):
+        obj = objs[i]
+        vals = [o2nc.grad_norm_c_upper(obj, x, setting["c"], n_mc=192,
+                                       seed=(job["seed"] + i) * 7919 + k)
+                for k, x in enumerate(r["snapshots"])]
+        outs.append({
+            "run_seed": job["seed"] + i,
+            "obj_seed": obj_seeds[i],
+            "mean_grad_c_upper": float(np.mean(vals)),
+            "max_grad_c_upper": float(np.max(vals)),
+            "n_snapshots": len(vals),
+            "final_F": float(obj.F(r["xbar_final"])),
+        })
     return {"index": job["index"], "outs": outs}
 
 
