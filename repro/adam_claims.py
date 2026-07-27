@@ -233,7 +233,9 @@ def make_setting(
                      the prior beta_2 >= beta_1^2 condition forbids (Claim 4 only)
       'relaxed_top'- just below beta_1^2, the top of that band
       'standard'   - at beta_1^2, satisfying BOTH the old and new conditions
-      'high'       - 0.999, a typical practical value
+      'high'       - a large beta_2 inside the admissible region:
+                     max(0.999, lower + 0.9(1 - lower)), so it is never below
+                     the theorem's own condition
       'violating'  - below the theorem's lower bound (outside its scope)
     """
     obj = o2nc.Objective(objective, d, sigma, seed=17)
@@ -262,7 +264,15 @@ def make_setting(
     elif beta2_choice == "standard":
         b2 = b1**2
     elif beta2_choice == "high":
-        b2 = 0.999
+        # "high" must mean high WITHIN the theorem's admissible region, not a
+        # hardcoded constant. A fixed 0.999 fell BELOW max(1-nu/(G+sigma),
+        # beta_1^2) for 10 of Theorem 7's 52 settings, so those settings were
+        # being scored against a theorem that says nothing about them -- caught
+        # by the independent checker, not by the sweep itself. Placing it most of
+        # the way from the lower bound to 1 keeps it admissible for every
+        # (eps, G, sigma) while still being a genuinely large beta_2.
+        _lo = base["beta2_lower_bound"]
+        b2 = max(0.999, _lo + 0.9 * (1.0 - _lo))
     elif beta2_choice == "violating":
         b2 = max(0.0, b1**4 - 4.0 * (b1**2 - b1**4))
     else:
