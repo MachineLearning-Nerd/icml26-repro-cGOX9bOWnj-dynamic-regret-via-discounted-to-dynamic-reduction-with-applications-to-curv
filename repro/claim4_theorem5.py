@@ -203,7 +203,12 @@ def run() -> ClaimResult:
     write_json(CLAIM_ID, "exploratory_beta2_below_condition.json", r_below)
 
     controls_ok = all(c["behaved_as_designed"] for c in controls)
-    verdict = "VERIFIED" if (n_fail == 0 and audit_ok and comp_ok) else ("FALSIFIED" if n_fail > 0 else "BLOCKED")
+    # controls_ok is part of the VERDICT, not just of the run gate. A sweep
+    # whose negative controls never fail has no power to distinguish the theorem
+    # from a weaker statement, and cannot support VERIFIED however many settings
+    # passed. Claim 5 previously reported VERIFIED with a dead noise control.
+    verdict = ("VERIFIED" if (n_fail == 0 and audit_ok and comp_ok and controls_ok)
+               else ("FALSIFIED" if n_fail > 0 else "BLOCKED"))
 
     write_json(CLAIM_ID, "summary.json", {
         "n_settings": len(rows), "n_failures": n_fail,
@@ -234,7 +239,11 @@ def run() -> ClaimResult:
         claim_id=CLAIM_ID,
         title="Theorem 5 - clipped Adam, relaxed beta_2 condition (Section 4.3.1)",
         verdict=verdict,
-        ok=(verdict in ("VERIFIED", "FALSIFIED")) and controls_ok,
+        # ok gates the RUN, not the science: BLOCKED is an honest outcome and
+        # must not be reported as broken infrastructure. A DEAD instrument --
+        # not one single control firing -- still fails, because then nothing was
+        # actually tested.
+        ok=any(c["behaved_as_designed"] for c in controls),
         headline={
             "n_settings": len(rows),
             "n_failures_of_conclusion": n_fail,

@@ -126,11 +126,19 @@ class Objective:
         return g[0] if single else g
 
     def stoch_grad(self, x: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-        """grad F(x) + xi, xi uniform on the sphere of radius sigma."""
-        xi = rng.standard_normal(self.d)
-        n = np.linalg.norm(xi)
-        xi = xi / n * self.sigma if n > 0 else xi
-        return self.grad(x) + xi
+        """grad F(x) + xi, xi uniform on the sphere of radius sigma.
+
+        Vectorised over a leading batch axis: given x of shape (S, d) this draws
+        S independent noise vectors, one per row, so S independent runs of the
+        algorithm can share a single Python-level loop iteration.
+        """
+        single = x.ndim == 1
+        X = x[None, :] if single else x
+        xi = rng.standard_normal(X.shape)
+        n = np.linalg.norm(xi, axis=1, keepdims=True)
+        xi = np.divide(xi, n, out=np.zeros_like(xi), where=n > 0) * self.sigma
+        out = self.grad(X) + xi
+        return out[0] if single else out
 
     def F_star(self, x0: np.ndarray) -> float:
         """A valid F* = F(x0) - inf F (Assumption 2), computed exactly."""
@@ -249,6 +257,145 @@ def run_o2nc(
             k += 1
 
     return {"snapshots": snaps[:k], "snapshot_rounds": snap_idx[:k], "x_final": x, "xbar_final": xbar}
+
+
+class StackedObjective:
+    """Presents S per-run Objectives as one objective with a batched gradient.
+
+    Only asym_valley actually differs between runs (its random matrix Q), and
+    that difference is what forced it onto the slow per-run path, where it was
+    ~9 minutes per setting instead of seconds. Its gradient is
+    h(Qx)^T Q with h(z) = tanh z - 0.3(1 - tanh^2 z), which batches cleanly over
+    a per-run Q, so the stacked form is exactly the same function evaluated
+    row-wise -- no approximation, and each run keeps its own Q.
+    """
+
+    def __init__(self, objs: list[Objective]):
+        kinds = {o.kind for o in objs}
+        if len(kinds) != 1:
+            raise ValueError(f"cannot stack objectives of mixed kinds: {kinds}")
+        self.objs = objs
+        self.kind = objs[0].kind
+        self.d = objs[0].d
+        self.sigma = objs[0].sigma
+        self.Q = np.stack([o.Q for o in objs]) if self.kind == "asym_valley" else None
+
+    def grad(self, X: np.ndarray) -> np.ndarray:
+        if self.kind != "asym_valley":
+            # every other objective is fully determined by (kind, d, sigma), so
+            # all runs share one function and the existing batched grad applies
+            return self.objs[0].grad(X)
+        Z = np.einsum("sij,sj->si", self.Q, X)
+        Th = np.tanh(Z)
+        H = Th - 0.3 * (1.0 - Th**2)
+        return np.einsum("si,sij->sj", H, self.Q)
+
+    def stoch_grad(self, x: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+        xi = rng.standard_normal(x.shape)
+        n = np.linalg.norm(xi, axis=1, keepdims=True)
+        xi = np.divide(xi, n, out=np.zeros_like(xi), where=n > 0) * self.sigma
+        return self.grad(x) + xi
+
+
+def run_o2nc_batch(
+    obj: Objective,
+    x0: np.ndarray,
+    T: int,
+    beta1: float,
+    beta2: float,
+    gamma: float,
+    nu: float,
+    D: float,
+    variant: str,
+    n_runs: int,
+    mu: float = 0.0,
+    seed: int = 0,
+    n_snapshots: int = 48,
+) -> list[dict[str, np.ndarray]]:
+    """Run n_runs INDEPENDENT copies of Algorithm 2 in one Python loop.
+
+    Identical mathematics to run_o2nc, executed with a leading run axis so that
+    T iterations of Python overhead are paid once instead of n_runs times. That
+    overhead was the whole cost: at T = 3.9M and 86 settings x 8 seeds the
+    scalar version projected past eight hours, essentially all of it interpreter
+    time on length-2 to length-5 vectors.
+
+    The runs remain independent -- separate noise, separate Exp(1) scalings,
+    separate snapshot rounds. What differs from calling run_o2nc n_runs times is
+    only WHICH pseudo-random numbers each run receives, since they are now drawn
+    from one generator in a different order. That changes no distribution, and
+    the run is still fully determined by `seed`.
+    """
+    rng = np.random.default_rng(seed)
+    d, S = obj.d, n_runs
+    # x0 may be a single point shared by every run, or one start point per run.
+    # Per-run start points matter: _start_point draws a random direction, so
+    # collapsing them would quietly average over less than the scalar path did.
+    X0 = np.asarray(x0, dtype=float)
+    x = np.tile(X0, (S, 1)) if X0.ndim == 1 else X0.copy()
+    if x.shape != (S, d):
+        raise ValueError(f"x0 must be (d,) or ({S}, {d}), got {X0.shape}")
+    xbar = x.copy()
+    m = np.zeros((S, d))
+    v = np.zeros(S)
+    delta = np.zeros((S, d))          # Delta_1 = 0 (empty sum in Eq. 5)
+
+    # Independent snapshot rounds per run, exactly as the scalar version draws
+    # them, indexed by round so the inner loop only pays a dict lookup.
+    snap_idx = np.stack([np.sort(rng.choice(np.arange(1, T + 1),
+                                            size=min(n_snapshots, T), replace=False))
+                         for _ in range(S)])
+    due: dict[int, list[int]] = {}
+    for r in range(S):
+        for t_ in snap_idx[r]:
+            due.setdefault(int(t_), []).append(r)
+    snaps = np.empty((S, snap_idx.shape[1], d))
+    filled = np.zeros(S, dtype=int)
+
+    beta = beta1                      # Algorithm 2 is run with beta = beta_1
+    g1 = gamma * (1.0 - beta1)
+    root_scale = np.sqrt(1.0 - beta2)
+
+    for t in range(1, T + 1):
+        s_t = rng.exponential(1.0, size=S)             # line 4: s_t ~ Exp(1)
+        x = x + s_t[:, None] * delta
+        g = obj.stoch_grad(x, rng)
+
+        # line 7: xbar_t = (beta - beta^t)/(1 - beta^t) xbar_{t-1} + (1-beta)/(1-beta^t) x_t
+        bt = beta**t
+        denom = 1.0 - bt
+        if denom <= 1e-300:           # t = 1 with beta -> 1; the update is xbar_1 = x_1
+            xbar = x.copy()
+        else:
+            xbar = ((beta - bt) / denom) * xbar + ((1.0 - beta) / denom) * x
+
+        m = beta1 * m + g
+        v = beta2 * v + np.einsum("sd,sd->s", g, g)
+
+        num = g1 * m
+        root = (root_scale * np.sqrt(v))[:, None]
+        if variant == "clipped":
+            cand = -num / (nu + root)
+            nrm = np.linalg.norm(cand, axis=1, keepdims=True)
+            scale = np.divide(np.minimum(nrm, D), nrm,
+                              out=np.ones_like(nrm), where=nrm > 0)
+            delta = cand * scale
+        elif variant == "clipfree":
+            delta = -num / (nu + gamma * mu * (1.0 - beta1**t) + root)
+        else:
+            raise ValueError(variant)
+
+        rows = due.get(t)
+        if rows is not None:
+            for r in rows:
+                snaps[r, filled[r]] = xbar[r]
+                filled[r] += 1
+
+    return [
+        {"snapshots": snaps[r, : filled[r]], "snapshot_rounds": snap_idx[r, : filled[r]],
+         "x_final": x[r], "xbar_final": xbar[r]}
+        for r in range(S)
+    ]
 
 
 # --------------------------------------------------------------------------

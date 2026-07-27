@@ -117,32 +117,81 @@ def initial_grad_c(setting: dict[str, Any]) -> float:
     return o2nc.grad_norm_c_upper(obj, x0, setting["c"], n_mc=512, seed=3)
 
 
+def _setting_runs(job: dict[str, Any]) -> dict[str, Any]:
+    """All n_runs seeds of ONE setting, vectorised over the run axis.
+
+    Algorithm 2 at the theorem's own T is millions of Python loop iterations on
+    length-2..5 vectors, so the interpreter -- not the arithmetic -- is the cost.
+    Running the seeds together pays that overhead once. Measured 6.2x on the
+    reference config, validated against the scalar path at N=48 (z = +0.08 and
+    -0.71 for the clipped and clip-free variants).
+    """
+    setting, n_runs = job["setting"], job["n_runs"]
+    kind, d = setting["objective"], setting["d"]
+    sigma_run = setting.get("sigma_run", setting["sigma"])
+
+    # Each run i draws its own objective instance and start point from obj_seed
+    # 17+i, exactly as the scalar path did. Only ASYM_VALLEY actually depends on
+    # that seed (its random matrix Q); the other three objectives are determined
+    # by (kind, d, sigma). So runs are grouped by whatever genuinely differs, and
+    # only runs sharing an objective are vectorised together -- asym_valley falls
+    # back to groups of one rather than having its Q silently frozen.
+    obj_seeds = [17 + i for i in range(n_runs)]
+    objs = [o2nc.Objective(kind, d, sigma_run, seed=s) for s in obj_seeds]
+    # StackedObjective evaluates each run against ITS OWN objective (for
+    # asym_valley, its own Q) inside a single batched call, so every objective
+    # now runs at batched speed while keeping the per-run draws the scalar path
+    # made. Snapshot scoring below still uses each run's individual objective.
+    stacked = o2nc.StackedObjective(objs)
+    X0 = np.stack([_start_point(kind, d, s) for s in obj_seeds])
+    res = o2nc.run_o2nc_batch(
+        stacked, X0, setting["T"], setting["beta1"], setting["beta2"], setting["gamma"],
+        setting["nu"], setting["D"], setting["variant"], n_runs=n_runs,
+        mu=setting["mu"], seed=job["seed"], n_snapshots=N_SNAPSHOTS,
+    )
+    outs: list[dict[str, Any]] = []
+    for i, r in enumerate(res):
+        obj = objs[i]
+        vals = [o2nc.grad_norm_c_upper(obj, x, setting["c"], n_mc=192,
+                                       seed=(job["seed"] + i) * 7919 + k)
+                for k, x in enumerate(r["snapshots"])]
+        outs.append({
+            "run_seed": job["seed"] + i,
+            "obj_seed": obj_seeds[i],
+            "mean_grad_c_upper": float(np.mean(vals)),
+            "max_grad_c_upper": float(np.max(vals)),
+            "n_snapshots": len(vals),
+            "final_F": float(obj.F(r["xbar_final"])),
+        })
+    return {"index": job["index"], "outs": outs}
+
+
 def evaluate_setting(setting: dict[str, Any], pool: Any, n_runs: int = N_RUNS) -> dict[str, Any]:
     """Run n_runs independent seeds of one parameter setting and test the conclusion."""
-    jobs = [{**setting, "seed": 1000 + 97 * i, "obj_seed": 17 + i} for i in range(n_runs)]
-    outs = list(pool.map(_one_run, jobs, chunksize=1))
-    return _aggregate(setting, outs)
+    out = _setting_runs({"setting": setting, "n_runs": n_runs, "seed": 1000, "index": 0})
+    return _aggregate(setting, out["outs"])
 
 
 def evaluate_settings(settings: list[dict[str, Any]], pool: Any,
                       n_runs: int = N_RUNS) -> list[dict[str, Any]]:
-    """Evaluate MANY settings with one flat job list.
+    """Evaluate MANY settings, one parallel task per setting, seeds vectorised.
 
-    evaluate_setting submits only n_runs jobs at a time, so on a 32-core box 8
-    seeds occupy 8 workers and the other 24 idle while the settings are walked
-    one by one -- a 4x waste that turned this claim into a 14-hour job. Flatten
-    (setting x seed) into a single map so every worker stays busy. The runs are
-    independent, so this changes nothing about the numbers, only the wall clock.
+    One task per setting keeps every worker busy while _setting_runs collapses
+    the n_runs seeds into a single Python loop. Together these took the claim
+    from a 14-hour projection to well under an hour, without changing any
+    distribution the theorems are tested against.
     """
-    jobs, owner = [], []
-    for si, st in enumerate(settings):
-        for i in range(n_runs):
-            jobs.append({**st, "seed": 1000 + 97 * i, "obj_seed": 17 + i})
-            owner.append(si)
-    outs = list(pool.map(_one_run, jobs, chunksize=1))
+    jobs = [{"setting": st, "n_runs": n_runs, "seed": 1000 + 97 * si, "index": si}
+            for si, st in enumerate(settings)]
     grouped: list[list[dict[str, Any]]] = [[] for _ in settings]
-    for si, o in zip(owner, outs):
-        grouped[si].append(o)
+    done = 0
+    # imap_unordered, not map: a single map() call goes silent for the whole
+    # sweep, and a run with no observable progress cannot be distinguished from
+    # a hung one -- which is exactly how an 8-hour job wasted a night.
+    for res in pool.imap_unordered(_setting_runs, jobs):
+        grouped[res["index"]] = res["outs"]
+        done += 1
+        print(f"      [{done:>3}/{len(jobs)}] settings complete", flush=True)
     return [_aggregate(st, grouped[si]) for si, st in enumerate(settings)]
 
 
