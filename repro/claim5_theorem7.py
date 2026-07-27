@@ -126,11 +126,21 @@ def run() -> ClaimResult:
                 "behaved_as_designed": bool(not r_a["conclusion_holds"]),
             })
 
-            noisy = {**base, "sigma_run": base["sigma"] * 40.0}
-            r_b = AC.evaluate_setting(noisy, pool, n_runs=8)
+            # The obvious noise control has NO POWER here and was measured to
+            # have none: injecting 40x the declared sigma still gave E = 0.084
+            # against eps = 0.6, because clip-free Adam with the damping term is
+            # genuinely noise-robust. A control that cannot fail proves nothing,
+            # so it is replaced by violating a condition that IS load-bearing:
+            # nu enters the step-size denominator, so nu = 2000(G+sigma) shrinks
+            # every step by ~2000x and the theorem's T is no longer enough. Same
+            # calibrated choice already verified to fire for Theorem 5.
+            bad_nu = AC.make_setting(VARIANT, base["objective"], base["d"], base["eps"], base["c"],
+                                     base["sigma"], base["beta2_choice"], PARAMS, nu_scale=2000.0)
+            r_b = AC.evaluate_setting(bad_nu, pool, n_runs=8)
             controls.append({
-                "control": "assumption4_violated",
-                "description": "inject gradient noise 40x the declared sigma while keeping the theorem's parameters",
+                "control": "nu_condition_violated",
+                "description": "set nu = 2000(G+sigma), violating the theorem's 0 < nu <= G+sigma, "
+                               "while keeping every other parameter and T at the theorem's values",
                 "expected": "E[||grad F||_c] exceeds eps",
                 "measured_upper_2se": r_b["E_grad_c_upper_2se"], "eps": r_b["eps"],
                 "behaved_as_designed": bool(not r_b["conclusion_holds"]),
@@ -190,7 +200,12 @@ def run() -> ClaimResult:
                 "note": "outside Theorem 7's stated condition; reported for context, not scored"})
 
     controls_ok = all(c["behaved_as_designed"] for c in controls)
-    verdict = "VERIFIED" if (n_fail == 0 and audit_ok and comp_ok) else ("FALSIFIED" if n_fail > 0 else "BLOCKED")
+    # controls_ok is part of the VERDICT, not just of the run gate. A sweep
+    # whose negative controls never fail has no power to distinguish the theorem
+    # from a weaker statement, and cannot support VERIFIED however many settings
+    # passed. Claim 5 previously reported VERIFIED with a dead noise control.
+    verdict = ("VERIFIED" if (n_fail == 0 and audit_ok and comp_ok and controls_ok)
+               else ("FALSIFIED" if n_fail > 0 else "BLOCKED"))
     write_json(CLAIM_ID, "summary.json", {
         "n_settings": len(rows), "n_failures": n_fail, "assumption_audit_ok": audit_ok,
         "complexity_symbolic_ok": comp_ok, "controls_ok": controls_ok,
@@ -215,7 +230,11 @@ def run() -> ClaimResult:
         claim_id=CLAIM_ID,
         title="Theorem 7 - clip-free Adam with composite loss (Section 4.4)",
         verdict=verdict,
-        ok=(verdict in ("VERIFIED", "FALSIFIED")) and controls_ok,
+        # ok gates the RUN, not the science: BLOCKED is an honest outcome and
+        # must not be reported as broken infrastructure. A DEAD instrument --
+        # not one single control firing -- still fails, because then nothing was
+        # actually tested.
+        ok=any(c["behaved_as_designed"] for c in controls),
         headline={
             "n_settings": len(rows),
             "n_failures_of_conclusion": n_fail,
