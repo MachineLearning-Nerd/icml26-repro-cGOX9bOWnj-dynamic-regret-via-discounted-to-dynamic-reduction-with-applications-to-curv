@@ -282,11 +282,161 @@ def check_claim3(lines: list[str]) -> bool:
                  f"worst relative Newton gradient norm {float(summary['worst_relative_newton_gradnorm']):.3e}")
     ok &= unconv == 0 and float(summary["worst_relative_newton_gradnorm"]) < 1e-6
 
+# claim 2
+# --------------------------------------------------------------------------
+def _naive_vaw(Z, y, beta: float, lam: float):
+    """Discounted VAW recomputed WITHOUT the O(d^2) recursion.
+
+    The verifier maintains S_t = beta S_{t-1} + z_t z_t^T incrementally. Here the
+    sums are rebuilt from scratch at every round straight from the definition in
+    Section 3.1. If the recursion had an off-by-one in its beta powers -- the
+    most likely way to implement this algorithm wrongly -- the two would disagree.
+    """
+    import numpy as np
+
+    T, d = Z.shape
+    X = np.empty((T, d))
+    for t in range(1, T + 1):
+        A = lam * (beta**t) * np.eye(d) + np.outer(Z[t - 1], Z[t - 1])
+        b = np.zeros(d)
+        for s in range(1, t):  # s < t
+            A += (beta ** (t - s)) * np.outer(Z[s - 1], Z[s - 1])
+            b += (beta ** (t - s)) * y[s - 1] * Z[s - 1]
+        X[t - 1] = np.linalg.solve(A, b)
+    return X
+
+
+def check_claim2(lines: list[str]) -> bool:
+    import numpy as np
+
+    ok = True
+    claim = "claim2_theorem2"
+    rows = _read_csv(claim, "sweep_results.csv")
+    summary = _read_json(claim, "summary.json")
+
+    # 1. margins and term decomposition recomputed from the stored columns
+    bad_margin = bad_terms = neg = 0
+    for r in rows:
+        rhs, dreg, margin = float(r["rhs_theorem2"]), float(r["dynamic_regret"]), float(r["margin"])
+        if not np.isclose(rhs - dreg, margin, rtol=1e-9, atol=1e-12):
+            bad_margin += 1
+        tsum = sum(float(r[f"term{i}"]) for i in (1, 2, 3, 4))
+        if not np.isclose(tsum, rhs, rtol=1e-9, atol=1e-12):
+            bad_terms += 1
+        if margin < 0:
+            neg += 1
+    lines.append(
+        f"claim2 sweep   : {len(rows)} rows; margin=rhs-regret mismatches={bad_margin}, "
+        f"term-sum mismatches={bad_terms}, negative margins={neg} "
+        f"(verifier reported {summary['n_violations_of_E']} violations)"
+    )
+    ok &= bad_margin == 0 and bad_terms == 0 and neg == 0 and summary["n_violations_of_E"] == 0
+
+    # 2. derivation link slacks must be nonnegative in the raw table
+    link_cols = [c for c in rows[0] if c.startswith("L") and "slack" in c]
+    link_bad = {c: sum(1 for r in rows if r[c] != "" and float(r[c]) < -1e-9) for c in link_cols}
+    # L3 is Lemma 25, which the campaign proved false by certified counterexample,
+    # so negative L3 slack is an expected documented finding. Every other link
+    # must hold on every configuration.
+    non_l3_bad = {k: v for k, v in link_bad.items() if not k.startswith("L3")}
+    lines.append(f"claim2 links   : negative-slack counts = {link_bad}; "
+                 f"non-L3 links all hold = {all(v == 0 for v in non_l3_bad.values())} "
+                 f"(L3 = Lemma 25, independently certified false)")
+    ok &= all(v == 0 for v in non_l3_bad.values())
+
+    # Independently re-certify the Lemma 25 counterexample from the stored raw
+    # instance, recomputing both sides here rather than trusting the verifier.
+    l25 = _read_json(claim, "lemma25_counterexample.json")
+    ce = l25["certified_counterexample"]
+    from mpmath import log as mlog
+    from mpmath import mp, mpf
+
+    mp.dps = 80
+    zz, cc, bb, ll = ce["z"], ce["c"], mpf(ce["beta"]), mpf(ce["lambda"])
+    A, lhs = ll, mpf(0)
+    for t in range(ce["T"]):
+        A = mpf(zz[t]) ** 2 + bb * A
+        lhs += mpf(cc[t]) ** 2 * mpf(zz[t]) ** 2 / A
+    S = sum(bb ** (ce["T"] - 1 - t) * mpf(zz[t]) ** 2 for t in range(ce["T"]))
+    rhs = mlog(1 / bb) * sum(mpf(x) ** 2 for x in cc) + max(mpf(x) ** 2 for x in cc) * mlog(1 + S / ll)
+    recert = bool(rhs - lhs < 0)
+    agrees = np.isclose(float(lhs), ce["lhs_float"], rtol=1e-9) and np.isclose(float(rhs), ce["rhs_float"], rtol=1e-9)
+    lines.append(
+        f"claim2 lemma25 : counterexample re-certified independently at 80 dps: violates={recert}, "
+        f"matches stored values={agrees} (LHS {float(lhs):.8f} > RHS {float(rhs):.8f})"
+    )
+    ok &= recert and agrees
+
+    route4 = _read_json(claim, "route4_focused_falsification.json")
+    lines.append(
+        f"claim2 route4  : {route4['n_restarts']} seeded restarts in the Lemma-25-failure region, "
+        f"best margin {route4['best_margin']:.4g}, counterexample to Theorem 2 found="
+        f"{route4['found_violation_of_E']}"
+    )
+
+    # 3. the sweep must actually be calibrated: some configuration has to get
+    #    close to the bound, or "no violation" carries no information
+    max_tight = max((float(r["tightness_ratio"]) for r in rows
+                     if r["tightness_ratio"] not in ("", "nan")), default=0.0)
+    adv_tight = summary["adversarial_true_bound"]["max_tightness_ratio_found"]
+    adv_margin = summary["adversarial_true_bound"]["best_margin"]
+    calibrated = (max(max_tight, adv_tight) > 0.25) and adv_margin < 1e-6
+    lines.append(
+        f"claim2 calib   : max tightness in sweep={max_tight:.4f}, via adversarial search={adv_tight:.4f}, "
+        f"adversarial best margin={adv_margin:.3g} -> test is calibrated={calibrated}"
+    )
+    ok &= calibrated
+
+    # 4. re-run a sample of configurations through the independent VAW
+    from .claim2_theorem2 import gen_comparators, gen_data
+
+    mismatches = 0
+    sampled = 0
+    for r in rows[:: max(1, len(rows) // 12)]:
+        T, d = int(r["T"]), int(r["d"])
+        if T > 120:  # the naive path is O(T^2 d^2); keep the checker quick
+            continue
+        Z, y = gen_data(r["data"], T, d, int(r["seed"]))
+        U = gen_comparators(r["comp"], Z, y, int(r["seed"]))
+        beta, lam = float(r["beta"]), float(r["lam"])
+        Xn = _naive_vaw(Z, y, beta, lam)
+        pred_alg = np.einsum("td,td->t", Xn, Z)
+        pred_cmp = np.einsum("td,td->t", U, Z)
+        dreg = float((0.5 * (pred_alg - y) ** 2).sum() - (0.5 * (pred_cmp - y) ** 2).sum())
+        sampled += 1
+        if not np.isclose(dreg, float(r["dynamic_regret"]), rtol=1e-6, atol=1e-8):
+            mismatches += 1
+    lines.append(
+        f"claim2 algo    : {sampled} configs re-run through a from-scratch VAW implementation "
+        f"(no recursion), dynamic-regret mismatches={mismatches}"
+    )
+    ok &= mismatches == 0 and sampled > 0
+
+    # 5. controls
+    ctl = _read_json(claim, "negative_controls.json")
+    ctl_ok = all(c["behaved_as_designed"] for c in ctl)
+    fired = sum(1 for c in ctl if c["search_found_violation"])
+    lines.append(
+        f"claim2 controls: {len(ctl)} weakened bounds, adversarial search broke {fired} of them, "
+        f"all behaved as designed={ctl_ok}"
+    )
+    ok &= ctl_ok
+
+    rate = _read_json(claim, "rate_subclaim.json")
+    rate_ok = rate["symbolic_min_equals_2sqrt_PV"] and rate["numeric_matches_closed_form"]
+    # independently re-derive min_q (P/q + qV) = 2 sqrt(PV) on the stored rows
+    rederived = all(
+        np.isclose(float(row["closed_form_2sqrtPV"]), 2 * np.sqrt(float(row["P"]) * float(row["V"])), rtol=1e-12)
+        for row in rate["rows"]
+    )
+    lines.append(f"claim2 rate    : symbolic+numeric tuning identity holds={rate_ok}, re-derived from raw rows={rederived}")
+    ok &= rate_ok and rederived
     return ok
 
 
 CHECKS: dict[str, Callable[[list[str]], bool]] = {
     "claim1_theorem1": check_claim1,
+    "claim2_theorem2": check_claim2,
     "claim3_theorem34": check_claim3,
 }
 
