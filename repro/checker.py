@@ -282,6 +282,10 @@ def check_claim3(lines: list[str]) -> bool:
                  f"worst relative Newton gradient norm {float(summary['worst_relative_newton_gradnorm']):.3e}")
     ok &= unconv == 0 and float(summary["worst_relative_newton_gradnorm"]) < 1e-6
 
+    return ok
+
+
+# --------------------------------------------------------------------------
 # claim 2
 # --------------------------------------------------------------------------
 def _naive_vaw(Z, y, beta: float, lam: float):
@@ -540,6 +544,13 @@ def run(results: list[dict[str, Any]]) -> tuple[bool, dict[str, Any]]:
             ok = fn(lines)
         except Exception as exc:  # a checker that crashes is a failed check
             lines.append(f"{r['claim_id']}: checker raised {type(exc).__name__}: {exc}")
+            ok = False
+        # A checker that falls off the end returns None. Treat anything that is
+        # not a bool as a failed check rather than letting it crash the suite
+        # (or, worse, be read as truthy) after hours of compute.
+        if not isinstance(ok, bool):
+            lines.append(f"{r['claim_id']}: checker returned {type(ok).__name__}, not bool "
+                         f"-- treated as failure")
             ok = False
         checked.append({"claim_id": r["claim_id"], "ok": ok})
         all_ok &= ok
