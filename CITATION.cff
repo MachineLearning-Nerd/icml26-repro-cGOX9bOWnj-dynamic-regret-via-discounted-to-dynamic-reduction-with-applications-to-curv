@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+title: "Legacy/source workspace for Dynamic Regret via Discounted-to-Dynamic Reduction with Applications to Curved Losses and Adam Optimizer"
+type: software
+authors:
+  - family-names: Xie
+    given-names: Yan-Feng
+  - family-names: Zhang
+    given-names: Yu-Jie
+  - family-names: Zhao
+    given-names: Peng
+  - family-names: Zhou
+    given-names: Zhi-Hua
+repository-code: "https://github.com/MachineLearning-Nerd/icml26-legacy-dynamic-regret-adam"
+url: "https://github.com/MachineLearning-Nerd/icml26-legacy-dynamic-regret-adam"
+abstract: "Legacy/source workspace preserving the implementation, evidence artifacts, and branch history for the associated ICML 2026 reproduction record."
+keywords:
+  - reproduction
+  - ICML 2026
+references:
+  - type: article
+    title: "Dynamic Regret via Discounted-to-Dynamic Reduction with Applications to Curved Losses and Adam Optimizer"
+    authors:
+      - family-names: Xie
+        given-names: Yan-Feng
+      - family-names: Zhang
+        given-names: Yu-Jie
+      - family-names: Zhao
+        given-names: Peng
+      - family-names: Zhou
+        given-names: Zhi-Hua
+    identifiers:
+      - type: arxiv
+        value: "2602.08372"
+    url: "https://arxiv.org/abs/2602.08372"
+
