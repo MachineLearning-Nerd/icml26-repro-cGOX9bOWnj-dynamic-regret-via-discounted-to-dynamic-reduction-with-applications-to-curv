@@ -25,6 +25,10 @@ publication claims. Their purposes and tips are preserved in
 details are in [`CITATION.cff`](CITATION.cff) and
 [`AUTHOR_THANK_YOU.md`](AUTHOR_THANK_YOU.md).
 
+## Thank you
+
+Thank you to the paper authors for making this research available for study. The full acknowledgment is in [`AUTHOR_THANK_YOU.md`](AUTHOR_THANK_YOU.md).
+
 Independent reproduction of **arXiv `2602.08372`** / OpenReview **`cGOX9bOWnj`**,
 *Dynamic Regret via Discounted-to-Dynamic Reduction with Applications to Curved Losses
 and Adam Optimizer*.
